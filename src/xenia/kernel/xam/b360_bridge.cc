@@ -11,6 +11,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 
 #include "xenia/base/logging.h"
 #include "xenia/base/platform.h"

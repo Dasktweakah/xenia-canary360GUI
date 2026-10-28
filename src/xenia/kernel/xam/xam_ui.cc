@@ -8,12 +8,16 @@
  */
 
 #include "xenia/kernel/xam/xam_ui.h"
+
+#include <cstdlib>
+
 #include "xenia/app/emulator_window.h"
 #include "xenia/base/png_utils.h"
 #include "xenia/base/system.h"
 #include "xenia/hid/input_system.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/util/shim_utils.h"
+#include "xenia/kernel/xam/b360_bridge.h"
 #include "xenia/kernel/xam/xam_content_device.h"
 #include "xenia/kernel/xam/xam_private.h"
 #include "xenia/ui/file_picker.h"
@@ -358,6 +362,30 @@ static dword_result_t XamShowMessageBoxUi(
 
     result = xeXamDispatchHeadless(run, overlapped);
   } else {
+    // Basically360 running: the dashboard shows it, the 360's way; the
+    // button picked (or B: cancelled) comes back.
+    if (!(flags & XMBox_PASSCODEMODE || flags & XMBox_VERIFYPASSCODEMODE) &&
+        b360::Available()) {
+      std::vector<std::string> fields = {
+          "MSGBOX", title, text, std::to_string(uint32_t(active_button)),
+          std::to_string(uint32_t(flags & 0xF))};
+      fields.insert(fields.end(), buttons.begin(), buttons.end());
+      auto run = [fields, result_ptr, active_button]() -> X_RESULT {
+        std::string reply;
+        if (!b360::Ask(fields, &reply)) {
+          result_ptr->ButtonPressed = static_cast<uint32_t>(active_button);
+          return X_ERROR_SUCCESS;
+        }
+        int picked = std::atoi(reply.c_str());
+        if (picked < 0) {
+          return X_ERROR_CANCELLED;
+        }
+        result_ptr->ButtonPressed = static_cast<uint32_t>(picked);
+        return X_ERROR_SUCCESS;
+      };
+      return xeXamDispatchHeadless(run, overlapped);
+    }
+
     switch (flags & 0xF) {
       case XMBox_NOICON: {
       } break;
@@ -1123,6 +1151,21 @@ dword_result_t XamShowAchievementsUI_entry(dword_t user_index,
 
   if (!info) {
     return X_ERROR_NO_SUCH_USER;
+  }
+
+  // Basically360 running: its achievements board instead (the game waits as
+  // it would for the console's own).
+  if (b360::Available()) {
+    std::vector<std::string> fields = {"ACHIEVEMENTS",
+                                       fmt::format("{:08X}", proper_title_id)};
+    kernel_state()->BroadcastNotification(kXNotificationSystemUI, true);
+    std::thread([fields]() {
+      std::string reply;
+      b360::Ask(fields, &reply);
+      xe::threading::Sleep(kUIDelayMillis);
+      kernel_state()->BroadcastNotification(kXNotificationSystemUI, false);
+    }).detach();
+    return X_ERROR_SUCCESS;
   }
 
   xe::ui::ImGuiDrawer* imgui_drawer =

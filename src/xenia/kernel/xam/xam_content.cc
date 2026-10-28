@@ -833,6 +833,17 @@ void XamLoaderGetMediaInfoEx_entry(lpdword_t media_type, lpdword_t title_id,
 }
 DECLARE_XAM_EXPORT1(XamLoaderGetMediaInfoEx, kNone, kStub);
 
+// Background downloads (of add-ons, while playing): there are none here.
+// Plants vs. Zombies Garden Warfare sets the mode while starting up and stops
+// there without an answer.
+dword_result_t XamBackgroundDownloadSetMode_entry(dword_t mode) {
+  return X_ERROR_SUCCESS;
+}
+DECLARE_XAM_EXPORT1(XamBackgroundDownloadSetMode, kNone, kStub);
+
+dword_result_t XamBackgroundDownloadIsEnabled_entry() { return 0; }
+DECLARE_XAM_EXPORT1(XamBackgroundDownloadIsEnabled, kNone, kStub);
+
 void XamLoaderGetMediaInfo_entry(lpdword_t media_type, lpdword_t title_id) {
   XamLoaderGetMediaInfoEx_entry(media_type, title_id, 0);
 }

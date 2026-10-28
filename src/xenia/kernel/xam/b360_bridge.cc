@@ -9,6 +9,9 @@
 
 #include "xenia/kernel/xam/b360_bridge.h"
 
+#include <atomic>
+#include <chrono>
+
 #include "xenia/base/logging.h"
 #include "xenia/base/platform.h"
 
@@ -100,9 +103,38 @@ bool Ask(const std::vector<std::string>& fields, std::string* reply) {
   return true;
 }
 
+bool GuideOpen() {
+  // The event is opened once the dashboard has made it; until then, looked for
+  // again at most every two seconds (this is asked on every controller read).
+  static std::atomic<HANDLE> event{nullptr};
+  static std::atomic<int64_t> next_look{0};
+  HANDLE h = event.load();
+  if (!h) {
+    const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch())
+                            .count();
+    if (now < next_look.load()) {
+      return false;
+    }
+    next_look = now + 2000;
+    h = OpenEventW(SYNCHRONIZE, FALSE, L"Local\\Basically360-guide-open");
+    if (!h) {
+      return false;
+    }
+    HANDLE expected = nullptr;
+    if (!event.compare_exchange_strong(expected, h)) {
+      CloseHandle(h);
+      h = expected;
+    }
+  }
+  return WaitForSingleObject(h, 0) == WAIT_OBJECT_0;
+}
+
 #else
 
 bool Available() { return false; }
+
+bool GuideOpen() { return false; }
 
 bool Ask(const std::vector<std::string>& fields, std::string* reply) {
   (void)fields;

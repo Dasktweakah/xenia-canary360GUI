@@ -480,6 +480,9 @@ X_RESULT ContentManager::OpenContent(const std::string_view root_name,
   if (static_cast<uint32_t>(cvars::license_mask) > 1) {
     content_license |= cvars::license_mask;
   }
+  XELOGI("{}: {} opened as {} - licence {:08X} (type {:08X})", __func__,
+         data.file_name(), root_name, content_license,
+         static_cast<uint32_t>(data.content_type));
 
   // Check for SPA file in package. Check it only for DLCs
   if (data.content_type == XContentType::kMarketplaceContent) {

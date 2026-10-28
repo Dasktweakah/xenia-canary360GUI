@@ -13,6 +13,7 @@
 #include "xenia/hid/input_system.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/util/shim_utils.h"
+#include "xenia/kernel/xam/b360_bridge.h"
 #include "xenia/kernel/xam/xam_private.h"
 #include "xenia/xbox.h"
 
@@ -117,7 +118,9 @@ dword_result_t XamInputGetState_entry(dword_t user_index, dword_t flags,
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
 
-  if (kernel_state()->xam_state()->IsUIActive()) {
+  // The Basically360 Guide up over the game: the game keeps running behind
+  // it but doesn't get the presses meant for the Guide (as on the console).
+  if (kernel_state()->xam_state()->IsUIActive() || b360::GuideOpen()) {
     // 58410A24
     X_INPUT_STATE discarded_state = {};
     auto input_system = kernel_state()->emulator()->input_system();
@@ -190,6 +193,20 @@ dword_result_t XamInputGetKeystrokeEx_entry(
 
   if (kernel_state()->xam_state()->IsUIActive()) {
     return X_ERROR_SUCCESS;
+  }
+
+  if (b360::GuideOpen()) {
+    // Read and dropped, so the Guide's presses don't reach the game once it's
+    // closed.
+    auto input_system = kernel_state()->emulator()->input_system();
+    auto lock = input_system->lock();
+    for (uint32_t i = 0; i < XUserMaxUserCount; i++) {
+      while (input_system->GetKeystroke(i, flags, keystroke) ==
+             X_ERROR_SUCCESS) {
+      }
+    }
+    keystroke.Zero();
+    return X_ERROR_EMPTY;
   }
 
   uint32_t user_index = *user_index_ptr;

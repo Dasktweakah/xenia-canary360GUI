@@ -338,9 +338,22 @@ dword_result_t xeXamContentCreate(dword_t user_index, lpstring_t root_name,
     // modify content_data.
     content_data.title_id = kernel_state()->title_id();
 
-    return package->GetContentMetadata() == content_data
-               ? X_ERROR_SUCCESS
-               : X_ERROR_INVALID_PARAMETER;
+    if (package->GetContentMetadata() != content_data) {
+      return X_ERROR_INVALID_PARAMETER;
+    }
+    // Already open: the caller still gets its licence (a DLC opened a second
+    // time would otherwise look unbought - a trial).
+    if (license_mask_ptr) {
+      uint32_t license = package->GetContentMetadata().license_mask;
+      if (static_cast<uint32_t>(cvars::license_mask) > 1) {
+        license |= cvars::license_mask;
+      }
+      *license_mask_ptr = license;
+    }
+    if (disposition_ptr) {
+      *disposition_ptr = static_cast<uint32_t>(kDispositionState::Open);
+    }
+    return X_ERROR_SUCCESS;
   }
 
   if (content_data.content_type == XContentType::kMarketplaceContent) {

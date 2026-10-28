@@ -28,6 +28,11 @@ bool Available();
 // default answer.
 bool Ask(const std::vector<std::string>& fields, std::string* reply);
 
+// Whether the dashboard's Guide is up over the game (the dashboard sets the
+// named event Basically360-guide-open while it is). The game keeps running
+// behind it, as on the console, but doesn't get the controller meanwhile.
+bool GuideOpen();
+
 }  // namespace b360
 }  // namespace xam
 }  // namespace kernel

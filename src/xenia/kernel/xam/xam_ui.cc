@@ -522,6 +522,33 @@ dword_result_t XamShowKeyboardUI_entry(
 
   auto buffer_size = static_cast<size_t>(buffer_length) * sizeof(char16_t);
 
+  // Basically360 running: its on-screen keyboard (the 360's) instead of
+  // Xenia's; the text typed comes back, or that it was cancelled.
+  if (!cvars::headless && b360::Available()) {
+    std::u16string def16 = default_text ? default_text.value() : u"";
+    std::vector<std::string> fields = {
+        "KEYBOARD",
+        title ? xe::to_utf8(title.value()) : "",
+        description ? xe::to_utf8(description.value()) : "",
+        xe::to_utf8(def16),
+        std::to_string(buffer_length ? uint32_t(buffer_length) - 1 : 0),
+        std::to_string(uint32_t(flags))};
+    auto run = [fields, def16, buffer, buffer_length]() -> X_RESULT {
+      std::string reply;
+      if (!b360::Ask(fields, &reply)) {
+        string_util::copy_and_swap_truncating(buffer, def16, buffer_length);
+        return X_ERROR_SUCCESS;
+      }
+      if (reply.empty() || reply[0] != '1') {
+        return X_ERROR_CANCELLED;
+      }
+      string_util::copy_and_swap_truncating(
+          buffer, xe::to_utf16(reply.substr(1)), buffer_length);
+      return X_ERROR_SUCCESS;
+    };
+    return xeXamDispatchHeadless(run, overlapped);
+  }
+
   X_RESULT result;
   if (cvars::headless) {
     auto run = [default_text, buffer, buffer_length,

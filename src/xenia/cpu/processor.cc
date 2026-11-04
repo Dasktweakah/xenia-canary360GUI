@@ -9,6 +9,8 @@
 
 #include "xenia/cpu/processor.h"
 
+#include <set>
+
 #include "xenia/base/assert.h"
 #include "xenia/base/atomic.h"
 #include "xenia/base/byte_order.h"
@@ -16,6 +18,7 @@
 #include "xenia/base/cvar.h"
 #include "xenia/base/debugging.h"
 #include "xenia/base/exception_handler.h"
+#include "xenia/base/filesystem.h"
 #include "xenia/base/literals.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/memory.h"
@@ -52,6 +55,12 @@ DEFINE_path(trace_function_data_path, "", "File to write trace data to.",
             "CPU");
 DEFINE_bool(break_on_start, false, "Break into the debugger on startup.",
             "CPU");
+DEFINE_path(
+    break_memory_dump, "",
+    "Basically360: when breaking into the guest debugger, also save the "
+    "guest memory around every pointer held in the threads' registers "
+    "(and the pointers found there) to this file.",
+    "CPU");
 
 namespace xe {
 namespace kernel {
@@ -869,6 +878,17 @@ void Processor::UpdateThreadExecutionStates(
   }
 }
 
+// Basically360: host threads (GPU, audio, ...) have no guest frames, and
+// their guest register context means nothing.
+static bool HasGuestFrames(const ThreadDebugInfo& thread_info) {
+  for (const auto& frame : thread_info.frames) {
+    if (frame.guest_pc) {
+      return true;
+    }
+  }
+  return false;
+}
+
 void Processor::LogThreadStacks() {
   auto global_lock = global_critical_region_.Acquire();
   XELOGI("Guest debugger break: call stacks of {} threads",
@@ -883,6 +903,21 @@ void Processor::LogThreadStacks() {
            thread_info->thread_id, thread_info->thread_handle,
            thread_info->thread->thread_name(), static_cast<uint32_t>(ctx.lr),
            static_cast<uint32_t>(ctx.ctr), static_cast<uint32_t>(ctx.r[1]));
+    if (HasGuestFrames(*thread_info)) {
+      for (int i = 0; i < 32; i += 8) {
+        XELOGI(
+            "    r{}-r{}: {:08X} {:08X} {:08X} {:08X} {:08X} {:08X} {:08X} "
+            "{:08X}",
+            i, i + 7, static_cast<uint32_t>(ctx.r[i]),
+            static_cast<uint32_t>(ctx.r[i + 1]),
+            static_cast<uint32_t>(ctx.r[i + 2]),
+            static_cast<uint32_t>(ctx.r[i + 3]),
+            static_cast<uint32_t>(ctx.r[i + 4]),
+            static_cast<uint32_t>(ctx.r[i + 5]),
+            static_cast<uint32_t>(ctx.r[i + 6]),
+            static_cast<uint32_t>(ctx.r[i + 7]));
+      }
+    }
     for (const auto& frame : thread_info->frames) {
       if (frame.guest_pc) {
         XELOGI("    guest {:08X} (function {:08X})", frame.guest_pc,
@@ -892,6 +927,76 @@ void Processor::LogThreadStacks() {
       }
     }
   }
+  if (!cvars::break_memory_dump.empty()) {
+    DumpMemoryAroundRegisters();
+  }
+}
+
+void Processor::DumpMemoryAroundRegisters() {
+  // 4 KB blocks of guest memory around each register value that points into
+  // readable guest memory, then one more level: the blocks that the pointers
+  // found inside those blocks point to. Records are big-endian
+  // (address, length) headers followed by the bytes.
+  constexpr uint32_t kBlockSize = 0x1000;
+  constexpr size_t kMaxBlocks = 8192;
+  auto readable = [this](uint32_t address) {
+    if (address < 0x40000000) {
+      return false;
+    }
+    if (!memory_->LookupHeap(address)) {
+      return false;
+    }
+    uint32_t protect = 0;
+    BaseHeap* heap = memory_->LookupHeap(address);
+    return heap->QueryProtect(address, &protect) &&
+           (protect & kMemoryProtectRead);
+  };
+  std::set<uint32_t> blocks;
+  auto add_around = [&](uint32_t value, uint32_t before, uint32_t after) {
+    if (!readable(value)) {
+      return;
+    }
+    uint32_t first = (value - std::min(value, before)) & ~(kBlockSize - 1);
+    uint32_t last = (value + after) & ~(kBlockSize - 1);
+    for (uint32_t block = first; block <= last && blocks.size() < kMaxBlocks;
+         block += kBlockSize) {
+      if (readable(block)) {
+        blocks.insert(block);
+      }
+    }
+  };
+  for (auto& it : thread_debug_infos_) {
+    auto thread_info = it.second.get();
+    if (!thread_info->thread || !HasGuestFrames(*thread_info)) {
+      continue;
+    }
+    for (int i = 0; i < 32; ++i) {
+      add_around(static_cast<uint32_t>(thread_info->guest_context.r[i]), 0x800,
+                 0x1800);
+    }
+  }
+  std::set<uint32_t> first_level = blocks;
+  for (uint32_t block : first_level) {
+    const uint8_t* data = memory_->TranslateVirtual<const uint8_t*>(block);
+    for (uint32_t offset = 0; offset < kBlockSize; offset += 4) {
+      add_around(xe::load_and_swap<uint32_t>(data + offset), 0, 0x200);
+    }
+  }
+  FILE* file = xe::filesystem::OpenFile(cvars::break_memory_dump, "wb");
+  if (!file) {
+    XELOGE("Could not open {} for the break memory dump",
+           xe::path_to_utf8(cvars::break_memory_dump));
+    return;
+  }
+  for (uint32_t block : blocks) {
+    uint32_t header[2] = {xe::byte_swap(block), xe::byte_swap(kBlockSize)};
+    fwrite(header, sizeof(header), 1, file);
+    fwrite(memory_->TranslateVirtual<const uint8_t*>(block), kBlockSize, 1,
+           file);
+  }
+  fclose(file);
+  XELOGI("Saved {} blocks of guest memory around the registers to {}",
+         blocks.size(), xe::path_to_utf8(cvars::break_memory_dump));
 }
 
 void Processor::SuspendAllBreakpoints() {

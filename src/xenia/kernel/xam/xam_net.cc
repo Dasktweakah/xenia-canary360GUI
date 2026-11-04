@@ -7,7 +7,15 @@
  ******************************************************************************
  */
 
+#include <algorithm>
+#include <cctype>
+#include <cstdio>
+#include <cstring>
+#include <string>
+
+#include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
+#include "xenia/base/string_util.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/xam/xam_module.h"
@@ -32,9 +40,95 @@
 #include <sys/socket.h>
 #endif
 
+DEFINE_bool(xnet_online, false,
+            "Basically360: report a working Ethernet link and an online "
+            "network address, let XNetServerToInAddr pass server addresses "
+            "through and treat XNetConnect as connected, so a title's own "
+            "networking (for example EA DirtySock) tries to go online. Meant "
+            "for a game's own config file, together with xnet_dns_overrides.",
+            "Live");
+DEFINE_string(xnet_dns_overrides, "",
+              "Basically360: XNetDnsLookup answers, as host=IPv4 pairs "
+              "separated by ';' or ','. A host may be exact, *.suffix or *. "
+              "Example: *.ea.com=127.0.0.1. Lookups with no match fail. Every "
+              "lookup is logged.",
+              "Live");
+
 namespace xe {
 namespace kernel {
 namespace xam {
+
+// Basically360: the IPv4 address (network byte order) xnet_dns_overrides
+// gives for a host name, if any.
+static bool LookupDnsOverride(std::string host, uint32_t* out_address_be) {
+  std::transform(host.begin(), host.end(), host.begin(),
+                 [](unsigned char c) { return char(std::tolower(c)); });
+  std::string candidates[2] = {host, host};
+  // DirtySock LSP lookups may carry a service name: try the part before it.
+  size_t service_pos = host.find("-servicename=");
+  if (service_pos != std::string::npos) {
+    candidates[1] = host.substr(0, service_pos);
+  }
+  std::string rules = cvars::xnet_dns_overrides;
+  std::replace(rules.begin(), rules.end(), ',', ';');
+  size_t start = 0;
+  while (start <= rules.size()) {
+    size_t end = rules.find(';', start);
+    if (end == std::string::npos) {
+      end = rules.size();
+    }
+    std::string rule = rules.substr(start, end - start);
+    start = end + 1;
+    size_t equals = rule.find('=');
+    if (equals == std::string::npos) {
+      continue;
+    }
+    std::string pattern = rule.substr(0, equals);
+    std::string address = rule.substr(equals + 1);
+    auto trim = [](std::string& value) {
+      while (!value.empty() && std::isspace((unsigned char)value.front())) {
+        value.erase(value.begin());
+      }
+      while (!value.empty() && std::isspace((unsigned char)value.back())) {
+        value.pop_back();
+      }
+    };
+    trim(pattern);
+    trim(address);
+    std::transform(pattern.begin(), pattern.end(), pattern.begin(),
+                   [](unsigned char c) { return char(std::tolower(c)); });
+    bool matched = false;
+    for (const auto& candidate : candidates) {
+      if (pattern == "*" || pattern == candidate) {
+        matched = true;
+      } else if (pattern.size() > 2 && pattern[0] == '*' && pattern[1] == '.') {
+        std::string suffix = pattern.substr(1);
+        matched = candidate.size() > suffix.size() &&
+                  candidate.compare(candidate.size() - suffix.size(),
+                                    suffix.size(), suffix) == 0;
+      }
+      if (matched) {
+        break;
+      }
+    }
+    if (!matched) {
+      continue;
+    }
+    uint32_t octets[4];
+    char tail;
+    if (std::sscanf(address.c_str(), "%u.%u.%u.%u%c", &octets[0], &octets[1],
+                    &octets[2], &octets[3], &tail) != 4 ||
+        octets[0] > 255 || octets[1] > 255 || octets[2] > 255 ||
+        octets[3] > 255) {
+      XELOGW("xnet_dns_overrides: '{}' is not an IPv4 address", address);
+      continue;
+    }
+    *out_address_be =
+        (octets[0] << 24) | (octets[1] << 16) | (octets[2] << 8) | octets[3];
+    return true;
+  }
+  return false;
+}
 
 // https://github.com/G91/TitanOffLine/blob/1e692d9bb9dfac386d08045ccdadf4ae3227bb5e/xkelib/xam/xamNet.h
 enum {
@@ -534,6 +628,15 @@ dword_result_t NetDll_XNetGetTitleXnAddr_entry(dword_t caller,
 
   std::memset(addr_ptr->abOnline, 0, 20);
 
+  if (cvars::xnet_online) {
+    // Basically360: look like a console with DHCP, a gateway, DNS and an
+    // online address.
+    addr_ptr->inaOnline.s_addr = htonl(INADDR_LOOPBACK);
+    addr_ptr->wPortOnline = 1000;
+    return 0x02 | 0x08 | 0x20 | 0x40 | 0x80;  // ETHERNET DHCP GATEWAY DNS
+                                              // ONLINE
+  }
+
   return XnAddrStatus::XNET_GET_XNADDR_STATIC;
 }
 DECLARE_XAM_EXPORT1(NetDll_XNetGetTitleXnAddr, kNetworking, kStub);
@@ -598,6 +701,11 @@ struct XEthernetStatus {
 };
 
 dword_result_t NetDll_XNetGetEthernetLinkStatus_entry(dword_t caller) {
+  if (cvars::xnet_online) {
+    // XNET_ETHERNET_LINK_ACTIVE | XNET_ETHERNET_LINK_100MBPS |
+    // XNET_ETHERNET_LINK_FULL_DUPLEX
+    return 0x01 | 0x02 | 0x08;
+  }
   return 0;
 }
 DECLARE_XAM_EXPORT1(NetDll_XNetGetEthernetLinkStatus, kNetworking, kStub);
@@ -605,11 +713,28 @@ DECLARE_XAM_EXPORT1(NetDll_XNetGetEthernetLinkStatus, kNetworking, kStub);
 dword_result_t NetDll_XNetDnsLookup_entry(dword_t caller, lpstring_t host,
                                           dword_t event_handle,
                                           lpdword_t pdns) {
-  // TODO(gibbed): actually implement this
+  // Basically360: answered from xnet_dns_overrides (no real DNS).
+  std::string host_name = host ? std::string(host.value()) : std::string();
+  uint32_t address_be = 0;
+  bool found = cvars::xnet_online && LookupDnsOverride(host_name, &address_be);
+  XELOGI("XNetDnsLookup('{}') -> {}", host_name,
+         found ? fmt::format("{}.{}.{}.{}", address_be >> 24,
+                             (address_be >> 16) & 0xFF,
+                             (address_be >> 8) & 0xFF, address_be & 0xFF)
+               : std::string("not found"));
   if (pdns) {
     auto dns_guest = kernel_memory()->SystemHeapAlloc(sizeof(XNDNS));
     auto dns = kernel_memory()->TranslateVirtual<XNDNS*>(dns_guest);
-    dns->status = 1;  // non-zero = error
+    std::memset(dns, 0, sizeof(XNDNS));
+    if (found) {
+      dns->status = 0;
+      dns->cina = 1;
+      uint8_t bytes[4] = {uint8_t(address_be >> 24), uint8_t(address_be >> 16),
+                          uint8_t(address_be >> 8), uint8_t(address_be)};
+      std::memcpy(&dns->aina[0], bytes, 4);
+    } else {
+      dns->status = 11001;  // WSAHOST_NOT_FOUND
+    }
     *pdns = dns_guest;
   }
   if (event_handle) {
@@ -631,6 +756,45 @@ dword_result_t NetDll_XNetDnsRelease_entry(dword_t caller,
   return 0;
 }
 DECLARE_XAM_EXPORT1(NetDll_XNetDnsRelease, kNetworking, kStub);
+
+// Basically360: server (LSP) addresses are reached directly through the host's
+// sockets, so the "secure" address is the server address itself and the
+// key exchange is always complete.
+dword_result_t NetDll_XNetServerToInAddr_entry(dword_t caller,
+                                               dword_t server_address,
+                                               dword_t service_id,
+                                               lpdword_t out_address) {
+  XELOGI("XNetServerToInAddr({:08X}, service {:08X})",
+         static_cast<uint32_t>(server_address),
+         static_cast<uint32_t>(service_id));
+  if (!cvars::xnet_online) {
+    return 0x80070032;  // ERROR_NOT_SUPPORTED as an HRESULT
+  }
+  if (out_address) {
+    *out_address = static_cast<uint32_t>(server_address);
+  }
+  return 0;
+}
+DECLARE_XAM_EXPORT1(NetDll_XNetServerToInAddr, kNetworking, kStub);
+
+dword_result_t NetDll_XNetUnregisterInAddr_entry(dword_t caller,
+                                                 dword_t address) {
+  return 0;
+}
+DECLARE_XAM_EXPORT1(NetDll_XNetUnregisterInAddr, kNetworking, kStub);
+
+dword_result_t NetDll_XNetConnect_entry(dword_t caller, dword_t address) {
+  XELOGI("XNetConnect({:08X})", static_cast<uint32_t>(address));
+  return cvars::xnet_online ? 0 : 0x80070032;
+}
+DECLARE_XAM_EXPORT1(NetDll_XNetConnect, kNetworking, kStub);
+
+dword_result_t NetDll_XNetGetConnectStatus_entry(dword_t caller,
+                                                 dword_t address) {
+  // XNET_CONNECT_STATUS_CONNECTED, or _LOST when not online.
+  return cvars::xnet_online ? 2 : 3;
+}
+DECLARE_XAM_EXPORT1(NetDll_XNetGetConnectStatus, kNetworking, kStub);
 
 dword_result_t NetDll_XNetQosServiceLookup_entry(dword_t caller, dword_t flags,
                                                  dword_t event_handle,
@@ -893,6 +1057,18 @@ dword_result_t NetDll_connect_entry(dword_t caller, dword_t socket_handle,
 
   N_XSOCKADDR native_name(name);
   X_STATUS status = socket->Connect(&native_name, namelen);
+  if (cvars::xnet_online && name && namelen >= sizeof(XSOCKADDR_IN)) {
+    // Basically360: show where titles connect to (xnet_online).
+    const auto* address =
+        reinterpret_cast<const XSOCKADDR_IN*>(name.host_address());
+    uint32_t ip = address->sin_addr;
+    XELOGI("connect(socket {:08X}) to {}.{}.{}.{}:{}: {}",
+           static_cast<uint32_t>(socket_handle), ip >> 24, (ip >> 16) & 0xFF,
+           (ip >> 8) & 0xFF, ip & 0xFF,
+           static_cast<uint16_t>(address->sin_port),
+           XFAILED(status) ? fmt::format("error {}", socket->GetLastWSAError())
+                           : std::string("ok"));
+  }
   if (XFAILED(status)) {
     XThread::SetLastError(socket->GetLastWSAError());
     return -1;

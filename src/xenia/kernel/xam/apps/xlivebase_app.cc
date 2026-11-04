@@ -9,7 +9,10 @@
 
 #include "xenia/kernel/xam/apps/xlivebase_app.h"
 
+#include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
+
+DECLARE_bool(xnet_online);
 
 namespace xe {
 namespace kernel {
@@ -45,6 +48,10 @@ X_HRESULT XLiveBaseApp::DispatchMessageSync(uint32_t message,
          - Return is Saved elsewhere and used here
       */
       XELOGD("XLiveBaseLogonGetHR, implemented in netplay");
+      if (cvars::xnet_online) {
+        // Basically360: the title's own servers are reachable (xnet_online).
+        return 0x001510F0;  // X_ONLINE_S_LOGON_CONNECTION_ESTABLISHED
+      }
       return 0x001510F1;  // X_ONLINE_S_LOGON_DISCONNECTED
     }
     case 0x00058004: {

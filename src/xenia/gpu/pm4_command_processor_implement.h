@@ -14,6 +14,7 @@ void COMMAND_PROCESSOR::ExecuteIndirectBuffer(uint32_t ptr,
     RingBuffer old_reader = reader_;
 
     // Execute commands!
+    ++indirect_depth_;
     new (&reader_)
         RingBuffer(memory_->TranslatePhysical(ptr), count * sizeof(uint32_t));
     reader_.set_write_offset(count * sizeof(uint32_t));
@@ -35,6 +36,8 @@ void COMMAND_PROCESSOR::ExecuteIndirectBuffer(uint32_t ptr,
 
     trace_writer_.WriteIndirectBufferEnd();
     reader_ = old_reader;
+    --indirect_depth_;
+    COMMAND_PROCESSOR::RecordPacketHistory(0xFFFFFFFF, ptr, count, 0);
   } else {
     // rare, but i've seen it happen! (and then a division by 0 occurs)
     return;
@@ -417,6 +420,30 @@ bool COMMAND_PROCESSOR::ExecutePacketType3(uint32_t packet) XE_RESTRICT {
       }
     }
 
+    switch (opcode) {
+      case PM4_EVENT_WRITE:
+      case PM4_EVENT_WRITE_SHD:
+      case PM4_MEM_WRITE:
+      case PM4_INDIRECT_BUFFER:
+      case PM4_INDIRECT_BUFFER_PFD:
+      case PM4_WAIT_REG_MEM:
+      case PM4_COND_WRITE:
+      case PM4_REG_TO_MEM:
+      case PM4_INTERRUPT:
+      case PM4_XE_SWAP: {
+        // Basically360: remember synchronization packets for the stall log.
+        RingBuffer peek = reader_;
+        uint32_t data[3] = {};
+        for (uint32_t i = 0; i < std::min(count, uint32_t(3)); ++i) {
+          data[i] = peek.ReadAndSwap<uint32_t>();
+        }
+        COMMAND_PROCESSOR::RecordPacketHistory(packet, data[0], data[1],
+                                               data[2]);
+      } break;
+      default:
+        break;
+    }
+
     bool result = false;
     switch (opcode) {
       case PM4_ME_INIT:
@@ -771,6 +798,7 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_WAIT_REG_MEM(
             waited_ms, is_memory ? "memory" : "register", poll_reg_addr,
             reg_info ? " " : "", reg_info ? reg_info->name : "", value, mask,
             wait_info & 7, ref, wait, wait_info);
+        COMMAND_PROCESSOR::LogPacketHistory();
       }
       if (cvars::gpu_wait_reg_mem_timeout_ms &&
           waited_ms >= cvars::gpu_wait_reg_mem_timeout_ms) {

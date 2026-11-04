@@ -594,11 +594,36 @@ void CommandProcessor::LogRegisterSets(uint32_t base_register_index,
 #endif
 }
 
+void CommandProcessor::LogPacketHistory() {
+  XELOGW(
+      "GPU packet history, oldest first (primary ring read {:X}, write {:X}):",
+      read_ptr_index_, write_ptr_index_.load());
+  uint32_t total = std::min(packet_history_next_, kPacketHistorySize);
+  for (uint32_t i = 0; i < total; ++i) {
+    const PacketHistoryEntry& entry =
+        packet_history_[(packet_history_next_ - total + i) %
+                        kPacketHistorySize];
+    if (entry.header == 0xFFFFFFFF) {
+      XELOGW("  {:>{}}end of indirect buffer {:08X} ({} dwords)", "",
+             entry.indirect_depth * 2, entry.data[0], entry.data[1]);
+    } else if ((entry.header >> 30) == 3) {
+      XELOGW("  {:>{}}type 3 op {:02X} count {}: {:08X} {:08X} {:08X}", "",
+             entry.indirect_depth * 2, (entry.header >> 8) & 0x7F,
+             ((entry.header >> 16) & 0x3FFF) + 1, entry.data[0], entry.data[1],
+             entry.data[2]);
+    } else {
+      XELOGW("  {:>{}}register {:04X} = {:08X}", "", entry.indirect_depth * 2,
+             entry.data[0], entry.data[1]);
+    }
+  }
+}
+
 void CommandProcessor::HandleSpecialRegisterWrite(uint32_t index,
                                                   uint32_t value) {
   RegisterFile& regs = *register_file_;
   // Scratch register writeback.
   if (index >= XE_GPU_REG_SCRATCH_REG0 && index <= XE_GPU_REG_SCRATCH_REG7) {
+    RecordPacketHistory(0, index, value, 0);
     uint32_t scratch_reg = index - XE_GPU_REG_SCRATCH_REG0;
     if ((1 << scratch_reg) & regs.values[XE_GPU_REG_SCRATCH_UMSK]) {
       // Enabled - write to address.

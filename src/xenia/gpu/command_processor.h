@@ -624,6 +624,31 @@ class CommandProcessor {
   uint64_t bin_select_ = 0xFFFFFFFFull;
   uint64_t bin_mask_ = 0xFFFFFFFFull;
 
+  // Basically360: the most recent synchronization-related packets (fences,
+  // memory writes, indirect buffers, waits, swaps, scratch register writes),
+  // logged when a WAIT_REG_MEM stalls so the order the GPU saw them in can be
+  // read from the log.
+  struct PacketHistoryEntry {
+    uint32_t header;
+    uint32_t data[3];
+    uint32_t indirect_depth;
+  };
+  static constexpr uint32_t kPacketHistorySize = 128;
+  PacketHistoryEntry packet_history_[kPacketHistorySize] = {};
+  uint32_t packet_history_next_ = 0;
+  uint32_t indirect_depth_ = 0;
+  void RecordPacketHistory(uint32_t header, uint32_t data0, uint32_t data1,
+                           uint32_t data2) {
+    PacketHistoryEntry& entry =
+        packet_history_[packet_history_next_++ % kPacketHistorySize];
+    entry.header = header;
+    entry.data[0] = data0;
+    entry.data[1] = data1;
+    entry.data[2] = data2;
+    entry.indirect_depth = indirect_depth_;
+  }
+  void LogPacketHistory();
+
   Shader* active_vertex_shader_ = nullptr;
   Shader* active_pixel_shader_ = nullptr;
 

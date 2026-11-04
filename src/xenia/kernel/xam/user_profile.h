@@ -109,9 +109,9 @@ class UserProfile {
   }
 
   std::string name() const { return account_info_.GetGamertagString(); }
-  uint32_t signin_state() const {
-    return static_cast<uint32_t>(SignInState::SignedInLocally);
-  };
+  // Basically360: signed in locally, or to Xbox Live with
+  // --xam_signin_live (for titles that only use the gamertag when online).
+  uint32_t signin_state() const;
   uint32_t type() const { return 1 | 2; /* local | online profile? */ }
 
   uint32_t GetReservedFlags() const {

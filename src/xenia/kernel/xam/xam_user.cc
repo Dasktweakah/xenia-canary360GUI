@@ -23,6 +23,7 @@
 
 DECLARE_int32(user_language);
 DECLARE_int32(user_country);
+DECLARE_bool(xam_signin_live);
 
 namespace xe {
 namespace kernel {
@@ -417,7 +418,9 @@ dword_result_t XamUserCheckPrivilege_entry(dword_t user_index, dword_t mask,
     for (uint8_t i = 0; i < XUserMaxUserCount; ++i) {
       const auto result = XamUserCheckPrivilege_entry(i, mask, out_value);
       if (result != X_ERROR_NO_SUCH_USER) {
-        *out_value = 0;
+        if (!cvars::xam_signin_live) {
+          *out_value = 0;
+        }
         return result;
       }
     }
@@ -440,7 +443,9 @@ dword_result_t XamUserCheckPrivilege_entry(dword_t user_index, dword_t mask,
   }
 
   // If we deny everything, games should hopefully not try to do stuff.
-  *out_value = 0;
+  // Basically360: with --xam_signin_live the profile is presented as a Live
+  // account in good standing, so grant what is asked for.
+  *out_value = cvars::xam_signin_live ? 1 : 0;
   return X_ERROR_SUCCESS;
 }
 DECLARE_XAM_EXPORT1(XamUserCheckPrivilege, kUserProfiles, kStub);

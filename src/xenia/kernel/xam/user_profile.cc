@@ -10,13 +10,28 @@
 #include "xenia/kernel/xam/user_profile.h"
 
 #include "third_party/fmt/include/fmt/format.h"
+#include "xenia/base/cvar.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/xam/xdbf/gpd_info.h"
 
+DEFINE_bool(xam_signin_live, false,
+            "Basically360: report signed-in profiles as signed in to Xbox Live "
+            "instead of locally, and grant the privileges games check for. "
+            "Some titles (such as Plants vs. Zombies Garden Warfare) only use "
+            "the gamertag when signed in to Live. Best set in a game's own "
+            "config file.",
+            "Kernel");
+
 namespace xe {
 namespace kernel {
 namespace xam {
+
+uint32_t UserProfile::signin_state() const {
+  return static_cast<uint32_t>(cvars::xam_signin_live
+                                   ? SignInState::SignedInToLive
+                                   : SignInState::SignedInLocally);
+}
 
 UserProfile::UserProfile(const uint64_t xuid,
                          const X_XAMACCOUNTINFO* account_info)

@@ -737,6 +737,10 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_WAIT_REG_MEM(
                 : register_file_->values[poll_reg_addr];
 
   bool matched = false;
+  // Basically360: a wait that never ends hangs the game with no trace, so
+  // long waits are logged (once) and can be cut short with a cvar.
+  auto wait_start = std::chrono::steady_clock::now();
+  bool wait_logged = false;
 
   do {
     uint32_t value = value_ref;
@@ -754,6 +758,27 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_WAIT_REG_MEM(
     matched = MatchValueAndRef(value & mask, ref, wait_info);
 
     if (!matched) {
+      auto waited_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                           std::chrono::steady_clock::now() - wait_start)
+                           .count();
+      if (!wait_logged && waited_ms >= 3000) {
+        wait_logged = true;
+        const RegisterInfo* reg_info =
+            is_memory ? nullptr : RegisterFile::GetRegisterInfo(poll_reg_addr);
+        XELOGW(
+            "WAIT_REG_MEM has waited {} ms: {} {:08X}{}{} (value {:08X} & mask "
+            "{:08X}, function {}, reference {:08X}, wait {:X}, info {:08X})",
+            waited_ms, is_memory ? "memory" : "register", poll_reg_addr,
+            reg_info ? " " : "", reg_info ? reg_info->name : "", value, mask,
+            wait_info & 7, ref, wait, wait_info);
+      }
+      if (cvars::gpu_wait_reg_mem_timeout_ms &&
+          waited_ms >= cvars::gpu_wait_reg_mem_timeout_ms) {
+        XELOGW("WAIT_REG_MEM gave up after {} ms ({} {:08X}, value {:08X})",
+               waited_ms, is_memory ? "memory" : "register", poll_reg_addr,
+               value);
+        break;
+      }
       // Wait.
       if (wait >= 0x100) {
         PrepareForWait();

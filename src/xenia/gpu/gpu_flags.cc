@@ -78,6 +78,13 @@ DEFINE_int32(occlusion_query_fake_upper_threshold, 100,
              "Ignored if occlusion_query_fake_lower_threshold is -1.",
              "GPU");
 
+DEFINE_uint32(gpu_wait_reg_mem_timeout_ms, 0,
+              "Basically360: give up on a WAIT_REG_MEM packet (the GPU waiting "
+              "for a register or memory value) after this many milliseconds "
+              "and carry on. 0 waits forever, like real hardware. Any wait "
+              "longer than 3 seconds is written to the log either way.",
+              "GPU");
+
 DEFINE_int32(anisotropic_override, -1,
              "Forces anisotropic filtering (AF) for eligible textures.\n"
              "Higher values keep textures sharper at oblique angles at the "

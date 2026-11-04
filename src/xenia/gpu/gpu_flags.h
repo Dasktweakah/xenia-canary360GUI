@@ -33,6 +33,8 @@ DECLARE_int32(occlusion_query_fake_lower_threshold);
 
 DECLARE_int32(occlusion_query_fake_upper_threshold);
 
+DECLARE_uint32(gpu_wait_reg_mem_timeout_ms);
+
 DECLARE_bool(occlusion_query_full_counters);
 
 DECLARE_bool(occlusion_query_viz);

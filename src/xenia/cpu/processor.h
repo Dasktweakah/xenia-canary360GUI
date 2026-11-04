@@ -227,6 +227,9 @@ class Processor {
   void UpdateThreadExecutionStates(
       uint32_t override_handle = 0,
       HostThreadContext* override_context = nullptr);
+  // Basically360: writes every thread's last-sampled call stack to the log
+  // (guest addresses, or host symbols), so a hang can be read from the log.
+  void LogThreadStacks();
 
   // Suspends all breakpoints, uninstalling them as required.
   // No breakpoints will be triggered until they are resumed.

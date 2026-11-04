@@ -869,6 +869,31 @@ void Processor::UpdateThreadExecutionStates(
   }
 }
 
+void Processor::LogThreadStacks() {
+  auto global_lock = global_critical_region_.Acquire();
+  XELOGI("Guest debugger break: call stacks of {} threads",
+         thread_debug_infos_.size());
+  for (auto& it : thread_debug_infos_) {
+    auto thread_info = it.second.get();
+    if (!thread_info->thread) {
+      continue;
+    }
+    const auto& ctx = thread_info->guest_context;
+    XELOGI("Thread {} (handle {:08X}) '{}': lr {:08X} ctr {:08X} r1 {:08X}",
+           thread_info->thread_id, thread_info->thread_handle,
+           thread_info->thread->thread_name(), static_cast<uint32_t>(ctx.lr),
+           static_cast<uint32_t>(ctx.ctr), static_cast<uint32_t>(ctx.r[1]));
+    for (const auto& frame : thread_info->frames) {
+      if (frame.guest_pc) {
+        XELOGI("    guest {:08X} (function {:08X})", frame.guest_pc,
+               frame.guest_function_address);
+      } else {
+        XELOGI("    host  {:016X} {}", frame.host_pc, frame.name);
+      }
+    }
+  }
+}
+
 void Processor::SuspendAllBreakpoints() {
   auto global_lock = global_critical_region_.Acquire();
   for (auto breakpoint : breakpoints_) {
@@ -890,6 +915,7 @@ void Processor::Pause() {
     SuspendAllThreads();
     SuspendAllBreakpoints();
     UpdateThreadExecutionStates();
+    LogThreadStacks();
     execution_state_ = ExecutionState::kPaused;
     if (debug_listener_) {
       debug_listener_->OnExecutionPaused();

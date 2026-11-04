@@ -7,11 +7,13 @@
  ******************************************************************************
  */
 
+#include <filesystem>
 #include <ranges>
 
 #include "xenia/kernel/kernel_state.h"
 
 #include "xenia/base/byte_stream.h"
+#include "xenia/base/filesystem.h"
 #include "xenia/base/logging.h"
 #include "xenia/emulator.h"
 #include "xenia/hid/input_system.h"
@@ -31,6 +33,10 @@
 #include "third_party/crypto/TinySHA1.hpp"
 
 DEFINE_bool(apply_title_update, true, "Apply title updates.", "Kernel");
+DEFINE_path(dump_module_images, "",
+            "Basically360: save each game module's memory image, as loaded "
+            "(after its title update), to this folder.",
+            "Kernel");
 DEFINE_bool(allow_incompatible_title_update, false,
             "Allow title updates with mismatched signatures to be applied.",
             "Kernel");
@@ -663,6 +669,29 @@ object_ref<UserModule> KernelState::LoadUserModuleFromMemory(
   return module;
 }
 
+// Basically360: the module's memory image (base address .. image size) written
+// to <dump_module_images>/<name> <base>.bin - the code as it runs, title update
+// applied - so it can be disassembled at the addresses the game uses.
+void KernelState::DumpModuleImage(const object_ref<UserModule>& module) {
+  auto xex = module->xex_module();
+  const uint32_t base = xex->base_address();
+  const uint32_t size = xex->image_size();
+  std::error_code ec;
+  std::filesystem::create_directories(cvars::dump_module_images, ec);
+  const auto path = cvars::dump_module_images /
+                    fmt::format("{} {:08X}.bin", module->name(), base);
+  FILE* file = xe::filesystem::OpenFile(path, "wb");
+  if (!file) {
+    XELOGE("Unable to save module image to {}", xe::path_to_utf8(path));
+    return;
+  }
+  fwrite(memory_->TranslateVirtual(base), 1, size, file);
+  fclose(file);
+  XELOGI("Saved module image {} ({:08X}-{:08X}, hash {:016X}) to {}",
+         module->name(), base, base + size, module->hash().value_or(0),
+         xe::path_to_utf8(path));
+}
+
 X_RESULT KernelState::FinishLoadingUserModule(
     const object_ref<UserModule> module, bool call_entry) {
   // TODO(Gliniak): Apply custom patches here
@@ -671,6 +700,9 @@ X_RESULT KernelState::FinishLoadingUserModule(
     return result;
   }
   module->Dump();
+  if (!cvars::dump_module_images.empty() && module->xex_module()) {
+    DumpModuleImage(module);
+  }
   emulator_->patcher()->ApplyPatchesForTitle(memory_, module->title_id(),
                                              module->hash());
   emulator_->on_patch_apply();

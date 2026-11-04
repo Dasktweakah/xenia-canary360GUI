@@ -247,6 +247,7 @@ class KernelState {
   object_ref<UserModule> LoadUserModuleFromMemory(const std::string_view name,
                                                   const void* addr,
                                                   const size_t length);
+  void DumpModuleImage(const object_ref<UserModule>& module);
   X_RESULT FinishLoadingUserModule(const object_ref<UserModule> module,
                                    bool call_entry = true);
   void UnloadUserModule(const object_ref<UserModule>& module,

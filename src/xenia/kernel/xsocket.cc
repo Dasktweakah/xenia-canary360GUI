@@ -200,7 +200,11 @@ X_STATUS XSocket::Bind(N_XSOCKADDR_IN* name, int name_len) {
   // Note: sin_port is xe::be<uint16_t> which automatically handles endianness,
   // so we use it directly without ntohs/htons.
   const uint16_t original_port = uint16_t(name->sin_port);
-  if (original_port < 1024) {
+  // Port 0 asks the system for any free port (EA's ProtoHttp binds every
+  // outgoing socket that way): it needs no privileges and must stay 0, or
+  // every such socket gets port 10000 and all but the first fail with
+  // WSAEADDRINUSE.
+  if (original_port != 0 && original_port < 1024) {
     uint16_t new_port = original_port + 10000;
     name->sin_port = new_port;
     XELOGW("XSocket::Bind: port {} requires privileges, remapping to port {}",

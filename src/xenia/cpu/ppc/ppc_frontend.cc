@@ -195,9 +195,10 @@ bool PPCFrontend::Initialize() {
       if (item.empty()) {
         continue;
       }
-      char* end = nullptr;
-      uint32_t address = uint32_t(std::strtoul(item.c_str(), &end, 16));
-      const bool dump_r4 = end && (*end == 'm' || *end == 'M');
+      char* parse_end = nullptr;
+      uint32_t address = uint32_t(std::strtoul(item.c_str(), &parse_end, 16));
+      const bool dump_r4 =
+          parse_end && (*parse_end == 'm' || *parse_end == 'M');
       if (!address || builtins_.trace_points.count(address)) {
         continue;
       }

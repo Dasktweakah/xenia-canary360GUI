@@ -126,6 +126,10 @@ static std::string TracePointText(Memory* memory, uint32_t value) {
 
 static void TracePoint(PPCContext* ppc_context, void* arg0, void* arg1) {
   uint32_t address = uint32_t(reinterpret_cast<uintptr_t>(arg0));
+  // Bit 0 set ("m" after the address in trace_guest_addresses): also dump the
+  // 64 bytes r4 points at (for example a message or request object).
+  const bool dump_r4 = address & 1;
+  address &= ~1u;
   uint32_t r[6];
   std::string text;
   for (int i = 0; i < 6; ++i) {
@@ -143,6 +147,23 @@ static void TracePoint(PPCContext* ppc_context, void* arg0, void* arg1) {
       uint32_t(ppc_context->r[9]), uint32_t(ppc_context->r[10]),
       uint32_t(ppc_context->r[11]), uint32_t(ppc_context->r[31]),
       uint32_t(ppc_context->ctr), uint32_t(ppc_context->lr), text);
+  auto memory = static_cast<Memory*>(arg1);
+  const uint32_t r4 = uint32_t(ppc_context->r[4]);
+  if (dump_r4 && r4 >= 0x10000 && r4 < 0xFFFF0000) {
+    auto heap = memory->LookupHeap(r4);
+    uint32_t protect = 0;
+    if (heap && heap->QueryProtect(r4, &protect) &&
+        (protect & kMemoryProtectRead) &&
+        heap->QueryProtect(r4 + 63, &protect) &&
+        (protect & kMemoryProtectRead)) {
+      auto p = memory->TranslateVirtual<const uint8_t*>(r4);
+      std::string words;
+      for (int i = 0; i < 16; ++i) {
+        words += fmt::format(" {:08X}", xe::load_and_swap<uint32_t>(p + i * 4));
+      }
+      XELOGI("trace {:08X} [r4]:{}", address, words);
+    }
+  }
 }
 
 bool PPCFrontend::Initialize() {
@@ -174,13 +195,16 @@ bool PPCFrontend::Initialize() {
       if (item.empty()) {
         continue;
       }
-      uint32_t address = uint32_t(std::strtoul(item.c_str(), nullptr, 16));
+      char* end = nullptr;
+      uint32_t address = uint32_t(std::strtoul(item.c_str(), &end, 16));
+      const bool dump_r4 = end && (*end == 'm' || *end == 'M');
       if (!address || builtins_.trace_points.count(address)) {
         continue;
       }
       builtins_.trace_points[address] = processor_->DefineBuiltin(
           fmt::format("TracePoint_{:08X}", address), TracePoint,
-          reinterpret_cast<void*>(uintptr_t(address)), processor_->memory());
+          reinterpret_cast<void*>(uintptr_t(address | (dump_r4 ? 1 : 0))),
+          processor_->memory());
     }
     if (!builtins_.trace_points.empty()) {
       XELOGI("Tracing {} guest addresses", builtins_.trace_points.size());

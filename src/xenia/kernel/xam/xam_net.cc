@@ -1122,6 +1122,7 @@ dword_result_t NetDll_accept_entry(dword_t caller, dword_t socket_handle,
 
     return new_socket->handle();
   } else {
+    XThread::SetLastError(socket->GetLastWSAError());
     return -1;
   }
 }
@@ -1216,6 +1217,13 @@ int_result_t NetDll_select_entry(dword_t caller, dword_t nfds,
   int ret = select(nfds, readfds ? &native_readfds : nullptr,
                    writefds ? &native_writefds : nullptr,
                    exceptfds ? &native_exceptfds : nullptr, timeout_in);
+  if (ret < 0) {
+#ifdef XE_PLATFORM_WIN32
+    XThread::SetLastError(WSAGetLastError());
+#else
+    XThread::SetLastError(errno);
+#endif
+  }
   if (readfds) {
     host_readfds.UpdateFrom(&native_readfds);
     host_readfds.Store(readfds);
@@ -1244,7 +1252,13 @@ dword_result_t NetDll_recv_entry(dword_t caller, dword_t socket_handle,
     return -1;
   }
 
-  return socket->Recv(buf_ptr, buf_len, flags);
+  int ret = socket->Recv(buf_ptr, buf_len, flags);
+  if (ret < 0) {
+    // Basically360: titles read WSAGetLastError() to tell "no data yet"
+    // (WSAEWOULDBLOCK on non-blocking sockets) from a broken connection.
+    XThread::SetLastError(socket->GetLastWSAError());
+  }
+  return ret;
 }
 DECLARE_XAM_EXPORT1(NetDll_recv, kNetworking, kImplemented);
 
@@ -1296,7 +1310,11 @@ dword_result_t NetDll_send_entry(dword_t caller, dword_t socket_handle,
     return -1;
   }
 
-  return socket->Send(buf_ptr, buf_len, flags);
+  int ret = socket->Send(buf_ptr, buf_len, flags);
+  if (ret < 0) {
+    XThread::SetLastError(socket->GetLastWSAError());
+  }
+  return ret;
 }
 DECLARE_XAM_EXPORT1(NetDll_send, kNetworking, kImplemented);
 
@@ -1314,6 +1332,9 @@ dword_result_t NetDll_sendto_entry(dword_t caller, dword_t socket_handle,
 
   N_XSOCKADDR_IN native_to(to_ptr);
   int ret = socket->SendTo(buf_ptr, buf_len, flags, &native_to, to_len);
+  if (ret < 0) {
+    XThread::SetLastError(socket->GetLastWSAError());
+  }
   return ret;
 }
 DECLARE_XAM_EXPORT1(NetDll_sendto, kNetworking, kImplemented);

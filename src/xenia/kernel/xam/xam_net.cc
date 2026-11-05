@@ -20,6 +20,7 @@
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/xam/xam_module.h"
 #include "xenia/kernel/xam/xam_private.h"
+#include "xenia/kernel/xam/xam_state.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_error.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_memory.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_threading.h"
@@ -860,6 +861,10 @@ dword_result_t XampXAuthStartup_entry(pointer_t<XAUTH_SETTINGS> setttings) {
   if (setttings->SizeOfStruct != 8) {
     return 0x80158401;
   }
+  if (cvars::xnet_online) {
+    // Basically360: tokens are made locally by XamGetToken (xnet_online).
+    return X_ERROR_SUCCESS;
+  }
 
   return 0x80158406;
 }
@@ -880,6 +885,69 @@ dword_result_t XampXAuthGetTitleBuffer_entry() {
   return 0;
 }
 DECLARE_XAM_EXPORT1(XampXAuthGetTitleBuffer, kNetworking, kStub);
+
+// Basically360: an Xbox Live (XAuth) token as titles read it - a header with
+// the token's size at +4 and a pointer to its bytes at +8, followed here by
+// the bytes. There is no Xbox Live to sign it, so it is plain text naming the
+// profile; servers standing in for the title's own (xnet_online) accept it.
+struct X_XAUTH_TOKEN {
+  xe::be<uint32_t> flags;
+  xe::be<uint32_t> size;
+  xe::be<uint32_t> data_ptr;
+  xe::be<uint32_t> reserved[5];
+};
+static_assert_size(X_XAUTH_TOKEN, 0x20);
+
+dword_result_t XamGetToken_entry(dword_t user_index, lpstring_t relying_party,
+                                 dword_t relying_party_length,
+                                 lpdword_t out_token,
+                                 pointer_t<XAM_OVERLAPPED> overlapped) {
+  std::string url = relying_party ? std::string(relying_party.value()) : "";
+  if (relying_party_length && url.size() > relying_party_length) {
+    url.resize(relying_party_length);
+  }
+  if (!cvars::xnet_online || !out_token) {
+    XELOGI("XamGetToken(user {}, '{}'): not online", uint32_t(user_index), url);
+    return X_ERROR_NOT_LOGGED_ON;
+  }
+  std::string gamertag = "Player";
+  uint64_t xuid = 0;
+  if (user_index < XUserMaxUserCount &&
+      kernel_state()->xam_state()->IsUserSignedIn(uint32_t(user_index))) {
+    const auto& profile =
+        kernel_state()->xam_state()->GetUserProfile(uint32_t(user_index));
+    gamertag = profile->name();
+    xuid = profile->xuid();
+  }
+  std::string text = fmt::format("XBL3.0 x={:016X};gamertag={};relyingparty={}",
+                                 xuid, gamertag, url);
+  uint32_t token_guest = kernel_memory()->SystemHeapAlloc(
+      uint32_t(sizeof(X_XAUTH_TOKEN) + text.size() + 1));
+  auto token = kernel_memory()->TranslateVirtual<X_XAUTH_TOKEN*>(token_guest);
+  std::memset(token, 0, sizeof(X_XAUTH_TOKEN));
+  token->size = uint32_t(text.size());
+  token->data_ptr = token_guest + uint32_t(sizeof(X_XAUTH_TOKEN));
+  std::memcpy(reinterpret_cast<uint8_t*>(token) + sizeof(X_XAUTH_TOKEN),
+              text.c_str(), text.size() + 1);
+  *out_token = token_guest;
+  XELOGI("XamGetToken(user {}, '{}') -> {} bytes", uint32_t(user_index), url,
+         text.size());
+  if (overlapped) {
+    kernel_state()->CompleteOverlappedImmediate(overlapped.guest_address(),
+                                                X_ERROR_SUCCESS);
+    return X_ERROR_IO_PENDING;
+  }
+  return X_ERROR_SUCCESS;
+}
+DECLARE_XAM_EXPORT1(XamGetToken, kNetworking, kSketchy);
+
+dword_result_t XamFreeToken_entry(dword_t token) {
+  if (token) {
+    kernel_memory()->SystemHeapFree(token);
+  }
+  return X_ERROR_SUCCESS;
+}
+DECLARE_XAM_EXPORT1(XamFreeToken, kNetworking, kSketchy);
 
 dword_result_t NetDll_XHttpStartup_entry(dword_t caller, dword_t reserved,
                                          dword_t reserved_ptr,

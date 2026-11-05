@@ -137,9 +137,12 @@ static void TracePoint(PPCContext* ppc_context, void* arg0, void* arg1) {
   }
   XELOGI(
       "trace {:08X} thread {:X}: r3={:08X} r4={:08X} r5={:08X} r6={:08X} "
-      "r7={:08X} r8={:08X} lr={:08X}{}",
+      "r7={:08X} r8={:08X} r9={:08X} r10={:08X} r11={:08X} r31={:08X} "
+      "ctr={:08X} lr={:08X}{}",
       address, ppc_context->thread_id, r[0], r[1], r[2], r[3], r[4], r[5],
-      uint32_t(ppc_context->lr), text);
+      uint32_t(ppc_context->r[9]), uint32_t(ppc_context->r[10]),
+      uint32_t(ppc_context->r[11]), uint32_t(ppc_context->r[31]),
+      uint32_t(ppc_context->ctr), uint32_t(ppc_context->lr), text);
 }
 
 bool PPCFrontend::Initialize() {

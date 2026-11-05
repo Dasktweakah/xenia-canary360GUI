@@ -9,6 +9,7 @@
 
 #include <filesystem>
 #include <ranges>
+#include <thread>
 
 #include "xenia/kernel/kernel_state.h"
 
@@ -37,6 +38,12 @@ DEFINE_path(dump_module_images, "",
             "Basically360: save each game module's memory image, as loaded "
             "(after its title update), to this folder.",
             "Kernel");
+DEFINE_uint32(dump_module_images_again_s, 120,
+              "Basically360: with dump_module_images, save each image again "
+              "this many seconds after it loads (\" later\" in the name), "
+              "when tables the title builds at run time are filled in. 0 "
+              "turns it off.",
+              "Kernel");
 DEFINE_bool(allow_incompatible_title_update, false,
             "Allow title updates with mismatched signatures to be applied.",
             "Kernel");
@@ -704,6 +711,23 @@ X_RESULT KernelState::FinishLoadingUserModule(
   module->Dump();
   if (!cvars::dump_module_images.empty() && module->xex_module()) {
     DumpModuleImage(module);
+    if (cvars::dump_module_images_again_s) {
+      const uint32_t delay_s = cvars::dump_module_images_again_s;
+      std::thread([this, module, delay_s]() {
+        std::this_thread::sleep_for(std::chrono::seconds(delay_s));
+        // Only while it is still loaded (PVZ.Splash, say, is gone by then).
+        bool loaded = false;
+        {
+          auto global_lock = global_critical_region_.Acquire();
+          for (auto& user_module : user_modules_) {
+            loaded |= user_module.get() == module.get();
+          }
+        }
+        if (loaded) {
+          DumpModuleImage(module, " later");
+        }
+      }).detach();
+    }
   }
   emulator_->patcher()->ApplyPatchesForTitle(memory_, module->title_id(),
                                              module->hash());
@@ -932,17 +956,6 @@ void KernelState::TerminateTitle() {
   XELOGD("KernelState::TerminateTitle");
   xmp_volume_patch_.reset();
   auto global_lock = global_critical_region_.Acquire();
-
-  // The images saved at load time have .data as the loader left it; save them
-  // again now, after the title's static initialisers have filled in tables
-  // built at run time (for example EA's TDF member tables).
-  if (!cvars::dump_module_images.empty()) {
-    for (auto& module : user_modules_) {
-      if (module->xex_module()) {
-        DumpModuleImage(module, " at exit");
-      }
-    }
-  }
 
   // Call terminate routines.
   // TODO(benvanik): these might take arguments.

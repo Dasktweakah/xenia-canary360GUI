@@ -11,6 +11,7 @@
 
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
+#include "xenia/kernel/xenumerator.h"
 
 DECLARE_bool(xnet_online);
 
@@ -79,13 +80,60 @@ X_HRESULT XLiveBaseApp::DispatchMessageSync(uint32_t message,
       return 0x80151802;  // X_ONLINE_E_LOGON_NOT_LOGGED_ON
     }
     case 0x00058020: {
-      // 0x00058004 is called right before this.
-      // We should create a XamEnumerate-able empty list here, but I'm not
-      // sure of the format.
-      // buffer_length seems to be the same ptr sent to 0x00058004.
-      XELOGD("CXLiveFriends::Enumerate({:08X}, {:08X}) unimplemented",
-             buffer_ptr, buffer_length);
-      return X_E_FAIL;
+      // XFriendsCreateEnumerator(user_index, starting_index,
+      // friends_to_return, *buffer_size, *enum_handle). The XDK's wrapper
+      // marshals its arguments into buffer_length: 16-byte entries of
+      // {be u32 size, u32 pad, be u64 address of the argument} with the entry
+      // count at +0x200; the first three addresses point at copies of the
+      // values, the last two are the caller's out pointers (seen in Plants vs.
+      // Zombies Garden Warfare, 0x882E4CA8, whose EA network library retries
+      // forever while this fails). Answer with an empty friends list: a valid
+      // enumerator that XamEnumerate reports as ERROR_NO_MORE_FILES.
+      if (!buffer_length) {
+        return X_E_INVALIDARG;
+      }
+      auto args = memory_->TranslateVirtual<uint8_t*>(buffer_length);
+      uint32_t arg_count = xe::load_and_swap<uint32_t>(args + 0x200);
+      if (arg_count < 5) {
+        XELOGW("XFriendsCreateEnumerator: {} marshalled arguments", arg_count);
+        return X_E_INVALIDARG;
+      }
+      auto arg_address = [&](uint32_t i) {
+        return uint32_t(xe::load_and_swap<uint64_t>(args + i * 16 + 8));
+      };
+      auto arg_value = [&](uint32_t i) {
+        uint32_t address = arg_address(i);
+        return address ? xe::load_and_swap<uint32_t>(
+                             memory_->TranslateVirtual(address))
+                       : 0u;
+      };
+      const uint32_t user_index = arg_value(0);
+      const uint32_t starting_index = arg_value(1);
+      uint32_t friends_to_return = std::max(arg_value(2), 1u);
+      const uint32_t buffer_size_ptr = arg_address(3);
+      const uint32_t handle_ptr = arg_address(4);
+      // XONLINE_FRIEND: XUID, gamertag[16], state, session id, title id, user
+      // time, invite id, invite time, rich presence length, wchar[64].
+      constexpr uint32_t kFriendSize = 0xC4;
+      auto e = make_object<XStaticUntypedEnumerator>(
+          kernel_state_, friends_to_return, kFriendSize);
+      auto result = e->Initialize(user_index, 0xFC, 0x58021, 0x58022, 0);
+      if (XFAILED(result)) {
+        return X_E_FAIL;
+      }
+      if (buffer_size_ptr) {
+        xe::store_and_swap<uint32_t>(memory_->TranslateVirtual(buffer_size_ptr),
+                                     kFriendSize * friends_to_return);
+      }
+      if (handle_ptr) {
+        xe::store_and_swap<uint32_t>(memory_->TranslateVirtual(handle_ptr),
+                                     e->handle());
+      }
+      XELOGD(
+          "XFriendsCreateEnumerator(user {}, start {}, count {}) -> empty "
+          "list, handle {:08X}",
+          user_index, starting_index, friends_to_return, e->handle());
+      return X_E_SUCCESS;
     }
     case 0x00058023: {
       XELOGD(

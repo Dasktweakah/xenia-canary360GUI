@@ -38,11 +38,12 @@ DEFINE_path(dump_module_images, "",
             "Basically360: save each game module's memory image, as loaded "
             "(after its title update), to this folder.",
             "Kernel");
-DEFINE_uint32(dump_module_images_again_s, 120,
+DEFINE_uint32(dump_module_images_again_s, 0,
               "Basically360: with dump_module_images, save each image again "
               "this many seconds after it loads (\" later\" in the name), "
               "when tables the title builds at run time are filled in. 0 "
-              "turns it off.",
+              "(the default) turns it off; builds with it on crashed Garden "
+              "Warfare at boot.",
               "Kernel");
 DEFINE_bool(allow_incompatible_title_update, false,
             "Allow title updates with mismatched signatures to be applied.",

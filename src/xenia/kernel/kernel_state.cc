@@ -672,14 +672,16 @@ object_ref<UserModule> KernelState::LoadUserModuleFromMemory(
 // Basically360: the module's memory image (base address .. image size) written
 // to <dump_module_images>/<name> <base>.bin - the code as it runs, title update
 // applied - so it can be disassembled at the addresses the game uses.
-void KernelState::DumpModuleImage(const object_ref<UserModule>& module) {
+void KernelState::DumpModuleImage(const object_ref<UserModule>& module,
+                                  std::string_view suffix) {
   auto xex = module->xex_module();
   const uint32_t base = xex->base_address();
   const uint32_t size = xex->image_size();
   std::error_code ec;
   std::filesystem::create_directories(cvars::dump_module_images, ec);
-  const auto path = cvars::dump_module_images /
-                    fmt::format("{} {:08X}.bin", module->name(), base);
+  const auto path =
+      cvars::dump_module_images /
+      fmt::format("{} {:08X}{}.bin", module->name(), base, suffix);
   FILE* file = xe::filesystem::OpenFile(path, "wb");
   if (!file) {
     XELOGE("Unable to save module image to {}", xe::path_to_utf8(path));
@@ -930,6 +932,17 @@ void KernelState::TerminateTitle() {
   XELOGD("KernelState::TerminateTitle");
   xmp_volume_patch_.reset();
   auto global_lock = global_critical_region_.Acquire();
+
+  // The images saved at load time have .data as the loader left it; save them
+  // again now, after the title's static initialisers have filled in tables
+  // built at run time (for example EA's TDF member tables).
+  if (!cvars::dump_module_images.empty()) {
+    for (auto& module : user_modules_) {
+      if (module->xex_module()) {
+        DumpModuleImage(module, " at exit");
+      }
+    }
+  }
 
   // Call terminate routines.
   // TODO(benvanik): these might take arguments.

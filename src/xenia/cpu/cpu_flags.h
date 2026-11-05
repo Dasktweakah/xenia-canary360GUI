@@ -26,6 +26,8 @@ DECLARE_bool(validate_hir);
 
 DECLARE_uint64(pvr);
 
+DECLARE_string(trace_guest_addresses);
+
 // Breakpoints:
 DECLARE_uint64(break_on_instruction);
 DECLARE_int32(break_condition_gpr);

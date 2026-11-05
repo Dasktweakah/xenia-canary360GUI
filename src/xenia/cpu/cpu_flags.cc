@@ -47,6 +47,15 @@ DEFINE_uint64(
     "mfgbootlauncher.xex) may check for a value that's less than 0x710700.",
     "CPU");
 
+// Basically360: trace points.
+DEFINE_string(
+    trace_guest_addresses, "",
+    "Basically360: guest code addresses (hex, separated by commas or spaces) "
+    "at which to log the thread, r3-r8 (with any text they point to) and the "
+    "link register each time the instruction is reached. A trace point just "
+    "after a call shows that call's result in r3.",
+    "CPU");
+
 // Breakpoints:
 DEFINE_uint64(break_on_instruction, 0,
               "int3 before the given guest address is executed.", "CPU");

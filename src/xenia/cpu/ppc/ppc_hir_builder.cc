@@ -173,6 +173,7 @@ bool PPCHIRBuilder::Emit(GuestFunction* function, uint32_t flags) {
     }
 
     MaybeBreakOnInstruction(address);
+    MaybeTraceInstruction(address);
 
     InstrData i;
     i.address = address;
@@ -197,6 +198,21 @@ bool PPCHIRBuilder::Emit(GuestFunction* function, uint32_t flags) {
   }
 
   return Finalize();
+}
+
+void PPCHIRBuilder::MaybeTraceInstruction(uint32_t address) {
+  // Basically360: --trace_guest_addresses.
+  auto& trace_points = builtins()->trace_points;
+  if (trace_points.empty()) {
+    return;
+  }
+  auto it = trace_points.find(address);
+  if (it == trace_points.end()) {
+    return;
+  }
+  Comment("--trace_guest_addresses target");
+  ContextBarrier();
+  CallExtern(it->second);
 }
 
 void PPCHIRBuilder::MaybeBreakOnInstruction(uint32_t address) {

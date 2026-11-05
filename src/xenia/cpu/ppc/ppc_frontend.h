@@ -11,6 +11,7 @@
 #define XENIA_CPU_PPC_PPC_FRONTEND_H_
 
 #include <memory>
+#include <unordered_map>
 
 #include "xenia/base/type_pool.h"
 #include "xenia/cpu/function.h"
@@ -34,6 +35,8 @@ struct PPCBuiltins {
   Function* enter_global_lock;
   Function* leave_global_lock;
   Function* syscall_handler;
+  // Basically360: --trace_guest_addresses, one builtin per address.
+  std::unordered_map<uint32_t, Function*> trace_points;
 };
 
 class PPCFrontend {

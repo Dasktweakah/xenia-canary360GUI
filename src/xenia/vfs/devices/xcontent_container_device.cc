@@ -8,7 +8,9 @@
  */
 
 #include "xenia/vfs/devices/xcontent_container_device.h"
+#include "xenia/base/filesystem.h"
 #include "xenia/base/logging.h"
+#include "xenia/vfs/devices/host_path_device.h"
 
 namespace xe {
 namespace vfs {
@@ -40,7 +42,32 @@ Entry* XContentContainerDevice::ResolvePath(const std::string_view path) {
   // be in the form:
   // some\PATH.foo
   XELOGFS("StfsContainerDevice::ResolvePath({})", path);
-  return root_entry_->ResolvePath(path);
+  Entry* entry = root_entry_->ResolvePath(path);
+  if (extra_files_) {
+    // A file in the extra files folder replaces the package's; a folder there
+    // is used only when the package has none by that name, so the package's
+    // own folders keep all of their files.
+    Entry* extra = extra_files_->ResolvePath(path);
+    if (extra && (!entry || !(extra->attributes() & kFileAttributeDirectory))) {
+      XELOGFS("StfsContainerDevice::ResolvePath({}): from the extra files",
+              path);
+      return extra;
+    }
+  }
+  return entry;
+}
+
+void XContentContainerDevice::SetExtraFiles(
+    const std::filesystem::path& folder) {
+  auto extra = std::make_unique<HostPathDevice>(mount_path(), folder, true);
+  if (!extra->Initialize()) {
+    XELOGE("XContent: couldn't read the extra files in {}",
+           xe::path_to_utf8(folder));
+    return;
+  }
+  XELOGI("XContent: {} adds its extra files from {}", mount_path(),
+         xe::path_to_utf8(folder));
+  extra_files_ = std::move(extra);
 }
 
 void XContentContainerDevice::Dump(StringBuffer* string_buffer) {

@@ -36,6 +36,10 @@ class XContentContainerDevice : public Device {
   const std::string& name() const override { return name_; }
   uint32_t attributes() const override { return 0; }
 
+  // Basically360: a folder of extra files that count as part of the package
+  // (see ResolvePath). Used to give a title update files from a newer one.
+  void SetExtraFiles(const std::filesystem::path& folder);
+
   uint32_t sectors_per_allocation_unit() const override { return 8; }
   uint32_t bytes_per_sector() const override { return 0x200; }
 
@@ -74,6 +78,7 @@ class XContentContainerDevice : public Device {
   const size_t data_file_count_;
   size_t files_total_size_;
   std::unique_ptr<Entry> root_entry_;
+  std::unique_ptr<Device> extra_files_;
 };
 
 }  // namespace vfs

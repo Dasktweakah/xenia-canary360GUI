@@ -160,12 +160,23 @@ std::unique_ptr<vfs::Device> ContentPackageContainer::MountPackage() {
 
   std::unique_ptr<vfs::Device> device = nullptr;
   switch (header_.content_metadata.volume_type) {
-    case XContentVolumeType::kStfs:
-      device = std::make_unique<vfs::StfsContainerDevice>(
+    case XContentVolumeType::kStfs: {
+      auto stfs = std::make_unique<vfs::StfsContainerDevice>(
           device_path_, &header_.content_metadata.volume_descriptor.stfs,
           package_->Slice(package_data_offset,
                           package_->size() - package_data_offset));
+      // Basically360: "<package>.files" next to a package holds extra files
+      // that count as part of it - e.g. a title update given the folders and
+      // DLC table of a newer one (vfs::XContentContainerDevice::ResolvePath).
+      std::filesystem::path extra = host_path_;
+      extra += ".files";
+      std::error_code ec;
+      if (std::filesystem::is_directory(extra, ec)) {
+        stfs->SetExtraFiles(extra);
+      }
+      device = std::move(stfs);
       break;
+    }
     case XContentVolumeType::kSvod:
       device = std::make_unique<vfs::SvodContainerDevice>(
           device_path_, host_path_, header_.content_metadata.data_file_count,

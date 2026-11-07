@@ -9,6 +9,9 @@
 
 #include "xenia/kernel/xam/apps/xlivebase_app.h"
 
+#include <algorithm>
+#include <cstring>
+
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/kernel/xenumerator.h"
@@ -78,6 +81,32 @@ X_HRESULT XLiveBaseApp::DispatchMessageSync(uint32_t message,
       XELOGD("XLiveBaseOnlineGetServiceInfo({:08X}, {:08X})", buffer_ptr,
              buffer_length);
       return 0x80151802;  // X_ONLINE_E_LOGON_NOT_LOGGED_ON
+    }
+    case 0x00058009: {
+      // Taken to be XContentGetMarketplaceCounts(user_index,
+      // content_categories, results_size, *results, *overlapped): buffer
+      // holds the first four arguments (16 bytes), results an
+      // XOFFERING_CONTENTAVAILABLE_RESULT {new offers, total offers}.
+      // Minecraft: Xbox 360 Edition sends it when Mini Games is opened (its
+      // log ended here, the loading screen spinning). No Marketplace here:
+      // nothing new, nothing offered.
+      if (!buffer || buffer_length < 16) {
+        return X_E_INVALIDARG;
+      }
+      const uint32_t user_index = xe::load_and_swap<uint32_t>(buffer + 0);
+      const uint32_t categories = xe::load_and_swap<uint32_t>(buffer + 4);
+      const uint32_t results_size = xe::load_and_swap<uint32_t>(buffer + 8);
+      const uint32_t results_ptr = xe::load_and_swap<uint32_t>(buffer + 12);
+      if (results_ptr >= 0x30000000 && results_ptr < 0xA0000000 &&
+          results_size) {
+        std::memset(memory_->TranslateVirtual(results_ptr), 0,
+                    std::min<uint32_t>(results_size, 8));
+      }
+      XELOGD(
+          "XContentGetMarketplaceCounts(user {}, categories {:08X}, {} bytes "
+          "at {:08X}) -> no offers",
+          user_index, categories, results_size, results_ptr);
+      return X_E_SUCCESS;
     }
     case 0x00058020: {
       // XFriendsCreateEnumerator(user_index, starting_index,

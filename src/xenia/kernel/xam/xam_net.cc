@@ -351,6 +351,14 @@ dword_result_t XNetLogonGetMachineID_entry(lpqword_t machine_id_ptr) {
 }
 DECLARE_XAM_EXPORT1(XNetLogonGetMachineID, kNetworking, kStub);
 
+// Basically360: Minecraft: Xbox 360 Edition calls this (an import Xenia had
+// no body for) when Mini Games is opened, just before it asks the
+// Marketplace for offers. Answer with the running title's ID.
+dword_result_t XNetLogonGetTitleID_entry() {
+  return kernel_state()->title_id();
+}
+DECLARE_XAM_EXPORT1(XNetLogonGetTitleID, kNetworking, kImplemented);
+
 dword_result_t NetDll_XNetGetOpt_entry(dword_t one, dword_t option_id,
                                        lpvoid_t buffer_ptr,
                                        lpdword_t buffer_size) {

@@ -94,12 +94,23 @@ void XContentContainerDevice::GraftExtraFiles(Entry* into, Entry* from) {
       it = extra_children.erase(it);
       continue;
     }
-    if ((own->attributes() & kFileAttributeDirectory) &&
-        ((*it)->attributes() & kFileAttributeDirectory)) {
+    const bool own_dir = own->attributes() & kFileAttributeDirectory;
+    const bool extra_dir = (*it)->attributes() & kFileAttributeDirectory;
+    if (own_dir && extra_dir) {
       GraftExtraFiles(own, it->get());
+    } else if (!own_dir && !extra_dir) {
+      // The same file: the extra one replaces the package's, in folder
+      // listings too (a game may take a file's size from its folder).
+      for (auto& child : into->children_) {
+        if (child.get() == own) {
+          (*it)->parent_ = into;
+          child = std::move(*it);
+          break;
+        }
+      }
+      it = extra_children.erase(it);
+      continue;
     }
-    // (A file by the same name stays with the extra files: ResolvePath
-    // returns it in place of the package's.)
     ++it;
   }
 }

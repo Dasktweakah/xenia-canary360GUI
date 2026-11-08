@@ -36,9 +36,19 @@ DEFINE_int32(
     "selected slot. Passthrough does not require assigning slot.",
     "HID");
 
+DEFINE_bool(keyboard_f9_switches_controller, false,
+            "F9 moves the keyboard to the next controller port (1, 2, 3, 4, "
+            "then 1 again). Ports it has been on stay plugged in, with nothing "
+            "pressed, so games don't stop for a missing controller. For "
+            "testing more than one player with one keyboard.",
+            "HID");
+
 namespace xe {
 namespace hid {
 namespace keyboard {
+
+// The ports the keyboard has been on (keyboard_f9_switches_controller).
+static uint32_t keyboard_ports_used_ = 0;
 
 uint8_t KeyboardInputDriver::VirtualKeyToHIDUsage(uint16_t vk) const {
   // Letters: contiguous in both VK and HID space
@@ -175,7 +185,11 @@ bool KeyboardInputDriver::IsKeyboardForUserEnabled(uint32_t user_index) {
     return false;
   }
 
-  return cvars::keyboard_user_index == user_index;
+  if (cvars::keyboard_user_index == user_index) {
+    return true;
+  }
+  return cvars::keyboard_f9_switches_controller && user_index < 4 &&
+         (keyboard_ports_used_ & (1u << user_index));
 }
 
 void KeyboardInputDriver::ParseKeyBinding(
@@ -282,7 +296,9 @@ X_RESULT KeyboardInputDriver::GetState(uint32_t user_index,
   int16_t thumb_rx = 0;
   int16_t thumb_ry = 0;
 
-  if (window()->HasFocus()) {
+  // A port the keyboard has moved away from: still there, nothing pressed.
+  if (window()->HasFocus() &&
+      user_index == uint32_t(cvars::keyboard_user_index)) {
     for (const KeyBinding& b : key_bindings_) {
       if (b.is_pressed) {
         switch (b.output_key) {
@@ -419,7 +435,8 @@ X_RESULT KeyboardInputDriver::GetKeystroke(uint32_t user_index, uint32_t flags,
   uint8_t hid_code = 0;
 
   if (!IsPassthroughEnabled()) {
-    if (IsKeyboardForUserEnabled(user_index)) {
+    if (IsKeyboardForUserEnabled(user_index) &&
+        user_index == uint32_t(cvars::keyboard_user_index)) {
       for (const KeyBinding& key_binding : key_bindings_) {
         if (key_binding.input_key != evt.virtual_key) {
           continue;
@@ -500,6 +517,22 @@ void KeyboardInputDriver::KeyboardWindowInputListener::OnKeyChar(
 void KeyboardInputDriver::OnKey(ui::KeyEvent& e, bool is_down) {
   if (static_cast<KeyboardMode>(cvars::keyboard_mode) ==
       KeyboardMode::Disabled) {
+    return;
+  }
+
+  if (cvars::keyboard_f9_switches_controller &&
+      e.virtual_key() == ui::VirtualKey::kF9) {
+    if (is_down && !e.prev_state()) {
+      auto global_lock = global_critical_region_.Acquire();
+      keyboard_ports_used_ |= 1u << (cvars::keyboard_user_index & 3);
+      cvars::keyboard_user_index = (cvars::keyboard_user_index + 1) & 3;
+      keyboard_ports_used_ |= 1u << cvars::keyboard_user_index;
+      for (auto& key_binding : key_bindings_) {
+        key_binding.is_pressed = false;
+      }
+      key_events_.clear();
+      XELOGI("Keyboard is now controller {}", cvars::keyboard_user_index + 1);
+    }
     return;
   }
 

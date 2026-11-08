@@ -1095,6 +1095,14 @@ bool XexModule::LoadContinue() {
   // Notify backend that we have an executable range.
   processor_->backend()->CommitExecutableRange(low_address_, high_address_);
 
+  // The rest of the image after the code can hold code a patch adds.
+  const uint32_t image_end = base_address_ + image_size();
+  if (high_address_ && image_end > high_address_) {
+    patch_code_high_ = image_end;
+    processor_->backend()->CommitExecutableRange(high_address_,
+                                                 patch_code_high_);
+  }
+
   // Add all imports (variables/functions).
   xex2_opt_import_libraries* opt_import_libraries = nullptr;
   GetOptHeader(XEX_HEADER_IMPORT_LIBRARIES, &opt_import_libraries);
@@ -1415,7 +1423,8 @@ bool XexModule::SetupLibraryImports(const std::string_view name,
 }
 
 bool XexModule::ContainsAddress(uint32_t address) {
-  return address >= low_address_ && address < high_address_;
+  return address >= low_address_ &&
+         address < std::max(high_address_, patch_code_high_);
 }
 
 std::unique_ptr<Function> XexModule::CreateFunction(uint32_t address) {

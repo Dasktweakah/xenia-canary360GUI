@@ -286,6 +286,10 @@ class XexModule : public xe::cpu::Module {
   uint32_t base_address_ = 0;
   uint32_t low_address_ = 0;
   uint32_t high_address_ = 0;
+  // End of the rest of the image after the code (.reloc and the like, unused
+  // once loaded), which patches may use for new code. Not part of the code
+  // range above, so the module hash patches match on is unchanged.
+  uint32_t patch_code_high_ = 0;
 
   XexFormat xex_format_ = kFormatUnknown;
   SecurityInfoContext security_info_ = {};

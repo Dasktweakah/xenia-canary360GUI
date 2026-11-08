@@ -212,22 +212,30 @@ dword_result_t XamInputGetKeystrokeEx_entry(
   uint32_t user_index = *user_index_ptr;
   auto input_system = kernel_state()->emulator()->input_system();
   auto lock = input_system->lock();
+  bool any_user = (flags & X_INPUT_FLAG::X_INPUT_FLAG_ANY_USER) != 0;
   if ((user_index & XUserIndexAny) == XUserIndexAny) {
-    // Always pin user to 0.
+    // XUSER_INDEX_ANY: a key from whichever controller has one, as on the
+    // console (the keyboard may be standing in for a controller other than
+    // the first).
+    any_user = true;
     user_index = 0;
   }
 
-  if (flags & X_INPUT_FLAG::X_INPUT_FLAG_ANY_USER) {
+  if (any_user) {
     // That flag means we should iterate over every connected controller and
     // check which one have pending request.
-    auto result = X_ERROR_DEVICE_NOT_CONNECTED;
+    X_RESULT result = X_ERROR_DEVICE_NOT_CONNECTED;
     for (uint32_t i = 0; i < XUserMaxUserCount; i++) {
-      auto result = input_system->GetKeystroke(i, flags, keystroke);
+      X_RESULT user_result = input_system->GetKeystroke(i, flags, keystroke);
 
       // Return result from first user that have pending request
-      if (result == X_ERROR_SUCCESS) {
+      if (user_result == X_ERROR_SUCCESS) {
         *user_index_ptr = keystroke->user_index;
-        return result;
+        return user_result;
+      }
+      // Connected but nothing pressed: "empty", not "no controller".
+      if (user_result == X_ERROR_EMPTY) {
+        result = X_ERROR_EMPTY;
       }
     }
     return result;

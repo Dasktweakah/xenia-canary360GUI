@@ -416,6 +416,14 @@ X_RESULT KeyboardInputDriver::GetKeystroke(uint32_t user_index, uint32_t flags,
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
 
+  // A port the keyboard has moved away from has no keys of its own. Leave the
+  // queue alone, or a game that asks every port in turn (or asks port 0 for
+  // "any user") would take the key away from the port the keyboard is on now.
+  if (!IsPassthroughEnabled() &&
+      user_index != uint32_t(cvars::keyboard_user_index)) {
+    return X_ERROR_EMPTY;
+  }
+
   // Pop from the queue.
   KeyEvent evt;
   {

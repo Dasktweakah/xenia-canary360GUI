@@ -36,8 +36,8 @@ DEFINE_int32(
     "selected slot. Passthrough does not require assigning slot.",
     "HID");
 
-DEFINE_bool(keyboard_f9_switches_controller, false,
-            "F9 moves the keyboard to the next controller port (1, 2, 3, 4, "
+DEFINE_bool(keyboard_insert_switches_controller, false,
+            "Insert moves the keyboard to the next controller port (1, 2, 3, 4, "
             "then 1 again). Ports it has been on stay plugged in, with nothing "
             "pressed, so games don't stop for a missing controller. For "
             "testing more than one player with one keyboard.",
@@ -47,7 +47,7 @@ namespace xe {
 namespace hid {
 namespace keyboard {
 
-// The ports the keyboard has been on (keyboard_f9_switches_controller).
+// The ports the keyboard has been on (keyboard_insert_switches_controller).
 static uint32_t keyboard_ports_used_ = 0;
 
 uint8_t KeyboardInputDriver::VirtualKeyToHIDUsage(uint16_t vk) const {
@@ -188,7 +188,7 @@ bool KeyboardInputDriver::IsKeyboardForUserEnabled(uint32_t user_index) {
   if (cvars::keyboard_user_index == user_index) {
     return true;
   }
-  return cvars::keyboard_f9_switches_controller && user_index < 4 &&
+  return cvars::keyboard_insert_switches_controller && user_index < 4 &&
          (keyboard_ports_used_ & (1u << user_index));
 }
 
@@ -520,8 +520,8 @@ void KeyboardInputDriver::OnKey(ui::KeyEvent& e, bool is_down) {
     return;
   }
 
-  if (cvars::keyboard_f9_switches_controller &&
-      e.virtual_key() == ui::VirtualKey::kF9) {
+  if (cvars::keyboard_insert_switches_controller &&
+      e.virtual_key() == ui::VirtualKey::kInsert) {
     if (is_down && !e.prev_state()) {
       auto global_lock = global_critical_region_.Acquire();
       keyboard_ports_used_ |= 1u << (cvars::keyboard_user_index & 3);

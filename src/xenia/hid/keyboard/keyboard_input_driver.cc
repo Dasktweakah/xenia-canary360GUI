@@ -36,12 +36,13 @@ DEFINE_int32(
     "selected slot. Passthrough does not require assigning slot.",
     "HID");
 
-DEFINE_bool(keyboard_insert_switches_controller, false,
-            "Insert moves the keyboard to the next controller port (1, 2, 3, 4, "
-            "then 1 again). Ports it has been on stay plugged in, with nothing "
-            "pressed, so games don't stop for a missing controller. For "
-            "testing more than one player with one keyboard.",
-            "HID");
+DEFINE_bool(
+    keyboard_insert_switches_controller, false,
+    "Insert moves the keyboard to the next controller port (1, 2, 3, 4, "
+    "then 1 again). Ports it has been on stay plugged in, with nothing "
+    "pressed, so games don't stop for a missing controller. For "
+    "testing more than one player with one keyboard.",
+    "HID");
 
 namespace xe {
 namespace hid {

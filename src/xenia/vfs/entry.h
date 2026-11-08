@@ -134,6 +134,9 @@ class Entry {
   virtual void update() { return; }
 
  protected:
+  // Basically360: grafts a package's extra files into its tree.
+  friend class XContentContainerDevice;
+
   Entry(Device* device, Entry* parent, const std::string_view path);
 
   virtual std::unique_ptr<Entry> CreateEntryInternal(

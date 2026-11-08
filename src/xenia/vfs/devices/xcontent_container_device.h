@@ -40,6 +40,14 @@ class XContentContainerDevice : public Device {
   // (see ResolvePath). Used to give a title update files from a newer one.
   void SetExtraFiles(const std::filesystem::path& folder);
 
+ private:
+  // Moves the extra files' entries into the package's own folders (where the
+  // package has no entry by that name), so they also show when the game lists
+  // a folder.
+  static void GraftExtraFiles(Entry* into, Entry* from);
+  void LoadExtraFiles();
+
+ public:
   uint32_t sectors_per_allocation_unit() const override { return 8; }
   uint32_t bytes_per_sector() const override { return 0x200; }
 
@@ -78,6 +86,7 @@ class XContentContainerDevice : public Device {
   const size_t data_file_count_;
   size_t files_total_size_;
   std::unique_ptr<Entry> root_entry_;
+  std::filesystem::path extra_files_folder_;
   std::unique_ptr<Device> extra_files_;
 };
 

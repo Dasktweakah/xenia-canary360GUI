@@ -34,6 +34,7 @@ bool XContentContainerDevice::Initialize() {
     return false;
   }
 
+  LoadExtraFiles();
   return true;
 }
 
@@ -59,15 +60,48 @@ Entry* XContentContainerDevice::ResolvePath(const std::string_view path) {
 
 void XContentContainerDevice::SetExtraFiles(
     const std::filesystem::path& folder) {
-  auto extra = std::make_unique<HostPathDevice>(mount_path(), folder, true);
+  extra_files_folder_ = folder;
+}
+
+void XContentContainerDevice::LoadExtraFiles() {
+  if (extra_files_folder_.empty()) {
+    return;
+  }
+  auto extra =
+      std::make_unique<HostPathDevice>(mount_path(), extra_files_folder_, true);
   if (!extra->Initialize()) {
     XELOGE("XContent: couldn't read the extra files in {}",
-           xe::path_to_utf8(folder));
+           xe::path_to_utf8(extra_files_folder_));
     return;
   }
   XELOGI("XContent: {} adds its extra files from {}", mount_path(),
-         xe::path_to_utf8(folder));
+         xe::path_to_utf8(extra_files_folder_));
+  GraftExtraFiles(root_entry_.get(), extra->ResolvePath(""));
   extra_files_ = std::move(extra);
+}
+
+void XContentContainerDevice::GraftExtraFiles(Entry* into, Entry* from) {
+  if (!into || !from) {
+    return;
+  }
+  auto& extra_children = from->children_;
+  for (auto it = extra_children.begin(); it != extra_children.end();) {
+    Entry* own = into->GetChild((*it)->name());
+    if (!own) {
+      // New to the package: becomes part of its folder.
+      (*it)->parent_ = into;
+      into->children_.push_back(std::move(*it));
+      it = extra_children.erase(it);
+      continue;
+    }
+    if ((own->attributes() & kFileAttributeDirectory) &&
+        ((*it)->attributes() & kFileAttributeDirectory)) {
+      GraftExtraFiles(own, it->get());
+    }
+    // (A file by the same name stays with the extra files: ResolvePath
+    // returns it in place of the package's.)
+    ++it;
+  }
 }
 
 void XContentContainerDevice::Dump(StringBuffer* string_buffer) {

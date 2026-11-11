@@ -479,6 +479,17 @@ dword_result_t XamLoaderGetLaunchData_entry(lpvoid_t buffer_ptr,
 }
 DECLARE_XAM_EXPORT1(XamLoaderGetLaunchData, kNone, kSketchy);
 
+// Basically360: the game asked to go back to the dashboard. Xenia closes at
+// once (settings saved, log flushed) instead of showing "Game requested exit to
+// dashboard." first; whatever started Xenia (the Basically360 dashboard) is
+// what the player goes back to. Does not return.
+[[noreturn]] static void ExitToDashboard() {
+  XELOGI("Game requested exit to dashboard: closing Xenia");
+  config::SaveConfig();
+  xe::FlushLog();
+  std::quick_exit(0);
+}
+
 void XamLoaderLaunchTitle_entry(lpstring_t raw_name_ptr, dword_t flags) {
   auto xam = kernel_state()->GetKernelModule<XamModule>("xam.xex");
 
@@ -497,9 +508,8 @@ void XamLoaderLaunchTitle_entry(lpstring_t raw_name_ptr, dword_t flags) {
         "Title closed with new launch data. \nPlease restart Xenia. "
         "Game will be loaded automatically.";
   } else {
-    title = "Title terminated";
-    message = "Game requested exit to dashboard.";
-    assert_always("Game requested exit to dashboard via XamLoaderLaunchTitle");
+    // Basically360: exit to the dashboard straight away, no message.
+    ExitToDashboard();
   }
 
   auto display_window = kernel_state()->emulator()->display_window();
@@ -530,34 +540,8 @@ void XamLoaderLaunchTitle_entry(lpstring_t raw_name_ptr, dword_t flags) {
 DECLARE_XAM_EXPORT1(XamLoaderLaunchTitle, kNone, kSketchy);
 
 void XamLoaderTerminateTitle_entry() {
-  std::string title = "Title terminated";
-  std::string message = "Game requested exit to dashboard.";
-  assert_always("Game requested exit to dashboard via XamLoaderTerminateTitle");
-
-  auto display_window = kernel_state()->emulator()->display_window();
-  auto imgui_drawer = kernel_state()->emulator()->imgui_drawer();
-
-  if (display_window && imgui_drawer) {
-    display_window->app_context().CallInUIThreadSynchronous(
-        [imgui_drawer, title, message]() {
-          auto dialog = xe::ui::ImGuiDialog::ShowMessageBox(
-              imgui_drawer, title.c_str(), message.c_str());
-
-          std::jthread([dialog]() {
-            while (!dialog->IsClosing()) {
-              std::this_thread::yield();
-            }
-
-            config::SaveConfig();
-            xe::FlushLog();
-
-            std::quick_exit(0);
-          }).detach();
-        });
-  }
-
-  // This function does not return.
-  kernel_state()->TerminateTitle();
+  // Basically360: exit to the dashboard straight away, no message.
+  ExitToDashboard();
 }
 DECLARE_XAM_EXPORT1(XamLoaderTerminateTitle, kNone, kSketchy);
 

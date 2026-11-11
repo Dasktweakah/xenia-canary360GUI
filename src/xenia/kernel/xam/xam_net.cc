@@ -678,16 +678,34 @@ DECLARE_XAM_EXPORT1(NetDll_XNetInAddrToString, kNetworking, kStub);
 // subsequent socket calls (like a handle to a XNet address)
 dword_result_t NetDll_XNetXnAddrToInAddr_entry(dword_t caller,
                                                pointer_t<XNADDR> xn_addr,
-                                               lpvoid_t xid, lpvoid_t in_addr) {
+                                               lpvoid_t xid,
+                                               lpvoid_t out_addr) {
+  if (cvars::xnet_online && xn_addr && out_addr) {
+    // Basically360: with no XNet security layer, a console's address is its
+    // own IP address (inaOnline when it has one, else ina), as is.
+    const in_addr& ina =
+        xn_addr->inaOnline.s_addr ? xn_addr->inaOnline : xn_addr->ina;
+    std::memcpy(out_addr, &ina, sizeof(ina));
+    return 0;
+  }
   return 1;
 }
 DECLARE_XAM_EXPORT1(NetDll_XNetXnAddrToInAddr, kNetworking, kStub);
 
 // Does the reverse of the above.
-// FIXME: Arguments may not be correct.
-dword_result_t NetDll_XNetInAddrToXnAddr_entry(dword_t caller, lpvoid_t in_addr,
+dword_result_t NetDll_XNetInAddrToXnAddr_entry(dword_t caller, dword_t address,
                                                pointer_t<XNADDR> xn_addr,
                                                lpvoid_t xid) {
+  if (cvars::xnet_online && xn_addr) {
+    // Basically360: the address of a console at in_addr, made the way
+    // XNetGetTitleXnAddr makes this console's own.
+    xn_addr.Zero();
+    xn_addr->ina.s_addr = htonl(uint32_t(address));
+    xn_addr->inaOnline.s_addr = htonl(uint32_t(address));
+    xn_addr->wPortOnline = 1000;
+    std::memset(xn_addr->abEnet, 0xCC, 6);
+    return 0;
+  }
   return 1;
 }
 DECLARE_XAM_EXPORT1(NetDll_XNetInAddrToXnAddr, kNetworking, kStub);

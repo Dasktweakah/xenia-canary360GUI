@@ -185,6 +185,14 @@ X_STATUS XSocket::IOControl(uint32_t cmd, uint8_t* arg_ptr) {
 #endif
 }
 
+// Bind gives a port below 1024 (but not 0) port + 10000 instead. Packets to and
+// from such a port on this machine (127.x.x.x) are mapped the same way, so a
+// title that talks to itself (a game's host on this console) still reaches its
+// own socket.
+static bool IsRemappedLoopbackPort(uint32_t address, uint16_t port) {
+  return (address >> 24) == 127 && port != 0 && port < 1024;
+}
+
 X_STATUS XSocket::Connect(N_XSOCKADDR* name, int name_len) {
   int ret = connect(native_handle_, (sockaddr*)name, name_len);
   if (ret < 0) {
@@ -292,8 +300,16 @@ int XSocket::RecvFrom(uint8_t* buf, uint32_t buf_len, uint32_t flags,
                      flags, (sockaddr*)&nfrom, &nfromlen);
   if (from) {
     from->sin_family = nfrom.sin_family;
-    from->sin_addr = ntohl(nfrom.sin_addr.s_addr);  // BE <- BE
-    from->sin_port = nfrom.sin_port;
+    const uint32_t address = ntohl(nfrom.sin_addr.s_addr);
+    uint16_t port = ntohs(nfrom.sin_port);
+    // Basically360: a packet from a privileged port on this machine (bound as
+    // port + 10000, see Bind) shows the port the title bound.
+    if (port > 10000 &&
+        IsRemappedLoopbackPort(address, static_cast<uint16_t>(port - 10000))) {
+      port = static_cast<uint16_t>(port - 10000);
+    }
+    from->sin_addr = address;
+    from->sin_port = port;
     std::memset(from->x_sin_zero, 0, sizeof(from->x_sin_zero));
   }
 
@@ -322,15 +338,25 @@ int XSocket::SendTo(uint8_t* buf, uint32_t buf_len, uint32_t flags,
   }
   */
 
-  sockaddr_in nto;
+  // to's port and address are numbers (N_XSOCKADDR_IN keeps them as
+  // xe::be values); sockaddr_in wants them in network byte order.
+  sockaddr_in nto = {};
   if (to) {
-    nto.sin_addr.s_addr = to->sin_addr;
+    uint16_t port = to->sin_port;
+    const uint32_t address = to->sin_addr;
+    // Basically360: a privileged port on this machine was bound as port +
+    // 10000 (see Bind), so that is where a packet to it has to go.
+    if (IsRemappedLoopbackPort(address, port)) {
+      port = static_cast<uint16_t>(port + 10000);
+    }
     nto.sin_family = to->sin_family;
-    nto.sin_port = to->sin_port;
+    nto.sin_port = htons(port);
+    nto.sin_addr.s_addr = htonl(address);
   }
 
   return sendto(native_handle_, reinterpret_cast<char*>(buf), buf_len, flags,
-                to ? (sockaddr*)&nto : nullptr, to_len);
+                to ? (sockaddr*)&nto : nullptr,
+                to ? static_cast<socklen_t>(sizeof(nto)) : 0);
 }
 
 bool XSocket::QueuePacket(uint32_t src_ip, uint16_t src_port,

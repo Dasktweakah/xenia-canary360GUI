@@ -10,7 +10,12 @@
 #include "xenia/kernel/xam/apps/xgi_app.h"
 #include "xenia/kernel/xsession.h"
 
+#include <random>
+
+#include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
+
+DECLARE_bool(xnet_online);
 
 namespace xe {
 namespace kernel {
@@ -223,7 +228,45 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
       // session creation.
 
       if (IsXboxLiveSession(static_cast<SessionFlags>(flags))) {
-        return 0x80155209;  // X_ONLINE_E_SESSION_NOT_LOGGED_ON
+        if (!cvars::xnet_online) {
+          return 0x80155209;  // X_ONLINE_E_SESSION_NOT_LOGGED_ON
+        }
+        // Basically360 (xnet_online): a title's own online service (for
+        // example EA Blaze, served locally) hosts the game, so an Xbox Live
+        // session is created here as on a console: a host gets a new
+        // XSESSION_INFO (an online-peer session id, its own XNADDR - as
+        // XNetGetTitleXnAddr gives it - and a key) and nonce. A joining
+        // console passes the host's XSESSION_INFO in and gets it back as is.
+        std::random_device random;
+        auto fill_random = [&random](uint8_t* out, size_t length) {
+          for (size_t i = 0; i < length; ++i) {
+            out[i] = static_cast<uint8_t>(random());
+          }
+        };
+        if ((flags & SessionFlags::HOST) && session_info_ptr) {
+          uint8_t* info = memory_->TranslateVirtual<uint8_t*>(session_info_ptr);
+          // XNKID sessionID (8)
+          fill_random(info, 8);
+          info[0] = 0x80 | (info[0] & 0x0F);  // XNET_XNKID_ONLINE_PEER
+          // XNADDR hostAddress (36): ina, inaOnline, wPortOnline, abEnet,
+          // abOnline
+          uint8_t* host = info + 8;
+          std::memset(host, 0, 36);
+          host[0] = 127;
+          host[3] = 1;
+          host[4] = 127;
+          host[7] = 1;
+          host[8] = 1000 >> 8;
+          host[9] = 1000 & 0xFF;
+          std::memset(host + 10, 0xCC, 6);
+          // XNKEY keyExchangeKey (16)
+          fill_random(info + 44, 16);
+        }
+        if ((flags & SessionFlags::HOST) && nonce_ptr) {
+          fill_random(memory_->TranslateVirtual<uint8_t*>(nonce_ptr), 8);
+        }
+        XELOGI("XSessionCreate: Xbox Live session (flags {:08X}) {}", flags,
+               (flags & SessionFlags::HOST) ? "hosted" : "joined");
       }
 
       return X_E_SUCCESS;

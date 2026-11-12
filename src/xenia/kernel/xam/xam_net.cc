@@ -535,10 +535,17 @@ dword_result_t NetDll_WSAWaitForMultipleEvents_entry(dword_t num_events,
 
   uint64_t timeout_wait = (uint64_t)timeout;
 
+  // fWaitAll is a BOOL (FALSE = return when any one event is signaled), while
+  // the kernel's wait type is WaitAll = 0 / WaitAny = 1: passed through as it
+  // was, a title waiting for any of two events (Garden Warfare's network
+  // thread: its wake-up event and its socket's) waited for both, forever.
+  const uint32_t wait_type =
+      wait_all ? X_KWAIT_REASON::WaitAll : X_KWAIT_REASON::WaitAny;
+
   X_STATUS result = 0;
   do {
     result = xboxkrnl::xeNtWaitForMultipleObjectsEx(
-        num_events, events, wait_all, 1, alertable,
+        num_events, events, wait_type, 1, alertable,
         timeout != -1 ? &timeout_wait : nullptr);
   } while (result == X_STATUS_ALERTED);
 
@@ -547,7 +554,9 @@ dword_result_t NetDll_WSAWaitForMultipleEvents_entry(dword_t num_events,
     XThread::SetLastError(error);
     return ~0u;
   }
-  return 0;
+  // WSA_WAIT_EVENT_0 + the index of the signaled event, WSA_WAIT_TIMEOUT
+  // (0x102) or WSA_WAIT_IO_COMPLETION (0xC0) share the kernel's values.
+  return result;
 }
 DECLARE_XAM_EXPORT2(NetDll_WSAWaitForMultipleEvents, kNetworking, kImplemented,
                     kBlocking);

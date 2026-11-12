@@ -20,7 +20,7 @@
 #include "xenia/ui/virtual_key.h"
 #include "xenia/ui/windowed_app_context_win.h"
 
-#include <cstdio>
+#include <cstdlib>
 
 #include <Dbt.h>
 #include <ShellScalingApi.h>
@@ -28,11 +28,12 @@
 
 DEFINE_string(
     window_rect, "",
-    "Basically360: where full screen goes, as x,y,width,height in desktop "
-    "pixels, for example 0,0,1920,540 for the top half of a 1080p screen. "
-    "With several copies of a game running side by side (one per player), "
-    "each gets its own part of the screen. Empty, the default, fills the "
-    "monitor the window is on.",
+    "Basically360: where full screen goes, as x,y,width,height: in desktop "
+    "pixels (0,0,1920,540 is the top half of a 1080p screen), or in percent of "
+    "the monitor the window is on (0%,50%,50%,50% is its bottom-left "
+    "quarter). With several copies of a game running side by side (one per "
+    "player), each gets its own part of the screen. Empty, the default, fills "
+    "the monitor.",
     "Display");
 
 namespace xe {
@@ -664,14 +665,43 @@ void Win32Window::ApplyFullscreenEntry(
   }
   // Basically360: full screen in a part of the desktop (window_rect).
   if (!cvars::window_rect.empty()) {
-    int rect_x, rect_y, rect_w, rect_h;
-    if (std::sscanf(cvars::window_rect.c_str(), "%d,%d,%d,%d", &rect_x, &rect_y,
-                    &rect_w, &rect_h) == 4 &&
-        rect_w > 0 && rect_h > 0) {
-      monitor_info.rcMonitor.left = rect_x;
-      monitor_info.rcMonitor.top = rect_y;
-      monitor_info.rcMonitor.right = rect_x + rect_w;
-      monitor_info.rcMonitor.bottom = rect_y + rect_h;
+    const RECT monitor = monitor_info.rcMonitor;
+    const LONG monitor_size[] = {monitor.right - monitor.left,
+                                 monitor.bottom - monitor.top};
+    const LONG monitor_origin[] = {monitor.left, monitor.top};
+    LONG rect[4];
+    size_t parsed = 0;
+    const char* text = cvars::window_rect.c_str();
+    while (parsed < 4) {
+      char* end = nullptr;
+      const double value = std::strtod(text, &end);
+      if (end == text) {
+        break;
+      }
+      // Odd entries are heights and y, even ones widths and x.
+      const size_t axis = parsed & 1;
+      if (*end == '%') {
+        rect[parsed] =
+            static_cast<LONG>(value * monitor_size[axis] / 100.0 + 0.5) +
+            (parsed < 2 ? monitor_origin[axis] : 0);
+        end++;
+      } else {
+        rect[parsed] = static_cast<LONG>(value);
+      }
+      parsed++;
+      while (*end == ' ') {
+        end++;
+      }
+      if (parsed < 4 && *end != ',') {
+        break;
+      }
+      text = end + (parsed < 4 ? 1 : 0);
+    }
+    if (parsed == 4 && rect[2] > 0 && rect[3] > 0) {
+      monitor_info.rcMonitor.left = rect[0];
+      monitor_info.rcMonitor.top = rect[1];
+      monitor_info.rcMonitor.right = rect[0] + rect[2];
+      monitor_info.rcMonitor.bottom = rect[1] + rect[3];
     } else {
       XELOGE("window_rect \"{}\" is not x,y,width,height", cvars::window_rect);
     }

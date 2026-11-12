@@ -10,6 +10,7 @@
 #include "xenia/ui/window_win.h"
 
 #include "xenia/base/assert.h"
+#include "xenia/base/cvar.h"
 #include "xenia/base/filesystem.h"
 #include "xenia/base/logging.h"
 #include "xenia/ui/surface_win.h"
@@ -19,9 +20,20 @@
 #include "xenia/ui/virtual_key.h"
 #include "xenia/ui/windowed_app_context_win.h"
 
+#include <cstdio>
+
 #include <Dbt.h>
 #include <ShellScalingApi.h>
 #include <dwmapi.h>
+
+DEFINE_string(
+    window_rect, "",
+    "Basically360: where full screen goes, as x,y,width,height in desktop "
+    "pixels, for example 0,0,1920,540 for the top half of a 1080p screen. "
+    "With several copies of a game running side by side (one per player), "
+    "each gets its own part of the screen. Empty, the default, fills the "
+    "monitor the window is on.",
+    "Display");
 
 namespace xe {
 namespace ui {
@@ -649,6 +661,20 @@ void Win32Window::ApplyFullscreenEntry(
       !GetMonitorInfo(monitor, &monitor_info)) {
     OnDesiredFullscreenUpdate(false);
     return;
+  }
+  // Basically360: full screen in a part of the desktop (window_rect).
+  if (!cvars::window_rect.empty()) {
+    int rect_x, rect_y, rect_w, rect_h;
+    if (std::sscanf(cvars::window_rect.c_str(), "%d,%d,%d,%d", &rect_x, &rect_y,
+                    &rect_w, &rect_h) == 4 &&
+        rect_w > 0 && rect_h > 0) {
+      monitor_info.rcMonitor.left = rect_x;
+      monitor_info.rcMonitor.top = rect_y;
+      monitor_info.rcMonitor.right = rect_x + rect_w;
+      monitor_info.rcMonitor.bottom = rect_y + rect_h;
+    } else {
+      XELOGE("window_rect \"{}\" is not x,y,width,height", cvars::window_rect);
+    }
   }
   // Preserve values for DPI rescaling of the window in the non-maximized state
   // if DPI is changed mid-fullscreen.

@@ -131,6 +131,9 @@ class XSocket : public XObject {
 
   uint32_t GetLastWSAError() const;
 
+  // Basically360: xnet_address as a number in host byte order, 0 when unset.
+  static uint32_t InstanceAddress();
+
   struct packet {
     // These values are in network byte order.
     xe::be<uint16_t> src_port;
@@ -146,6 +149,7 @@ class XSocket : public XObject {
 
  private:
   XSocket(KernelState* kernel_state, uint64_t native_handle);
+  void BindToInstanceAddress();
   uint64_t native_handle_ = -1;
 
   AddressFamily af_;    // Address family

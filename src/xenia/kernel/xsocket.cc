@@ -11,6 +11,7 @@
 
 #include <cstring>
 
+#include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/platform.h"
 #include "xenia/kernel/kernel_state.h"
@@ -31,6 +32,16 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #endif
+
+DEFINE_string(
+    xnet_address, "",
+    "Basically360: this console's IPv4 address on this PC, for running more "
+    "than one copy of a game that plays online with itself (one per player): "
+    "each copy gets its own loopback address (127.0.0.1, 127.0.0.2, ...). "
+    "Sockets bound to any address are bound to it, connections and packets "
+    "leave from it, and XNetGetTitleXnAddr reports it. Empty, the default, "
+    "changes nothing. Used with xnet_online.",
+    "Live");
 
 namespace xe {
 namespace kernel {
@@ -185,6 +196,41 @@ X_STATUS XSocket::IOControl(uint32_t cmd, uint8_t* arg_ptr) {
 #endif
 }
 
+// Basically360: xnet_address as a number (0 = not set).
+uint32_t XSocket::InstanceAddress() {
+  static const uint32_t address = []() -> uint32_t {
+    if (cvars::xnet_address.empty()) {
+      return 0;
+    }
+    in_addr parsed = {};
+    if (inet_pton(AF_INET, cvars::xnet_address.c_str(), &parsed) != 1) {
+      XELOGE("xnet_address \"{}\" is not an IPv4 address", cvars::xnet_address);
+      return 0;
+    }
+    XELOGI("xnet_address: this console is {}", cvars::xnet_address);
+    return ntohl(parsed.s_addr);
+  }();
+  return address;
+}
+
+// Basically360: a socket the title has not bound is bound to xnet_address (any
+// free port) before it connects or sends, so the other end sees this copy's
+// address rather than the first loopback address.
+void XSocket::BindToInstanceAddress() {
+  const uint32_t address = InstanceAddress();
+  if (!address || bound_) {
+    return;
+  }
+  sockaddr_in local = {};
+  local.sin_family = AF_INET;
+  local.sin_addr.s_addr = htonl(address);
+  local.sin_port = 0;
+  if (bind(native_handle_, reinterpret_cast<sockaddr*>(&local),
+           sizeof(local)) == 0) {
+    bound_ = true;
+  }
+}
+
 // Bind gives a port below 1024 (but not 0) port + 10000 instead. Packets to and
 // from such a port on this machine (127.x.x.x) are mapped the same way, so a
 // title that talks to itself (a game's host on this console) still reaches its
@@ -194,6 +240,7 @@ static bool IsRemappedLoopbackPort(uint32_t address, uint16_t port) {
 }
 
 X_STATUS XSocket::Connect(N_XSOCKADDR* name, int name_len) {
+  BindToInstanceAddress();
   int ret = connect(native_handle_, (sockaddr*)name, name_len);
   if (ret < 0) {
     return X_STATUS_UNSUCCESSFUL;
@@ -217,6 +264,11 @@ X_STATUS XSocket::Bind(N_XSOCKADDR_IN* name, int name_len) {
     name->sin_port = new_port;
     XELOGW("XSocket::Bind: port {} requires privileges, remapping to port {}",
            original_port, new_port);
+  }
+
+  // Basically360: "any address" is this copy's own (xnet_address).
+  if (uint32_t(name->sin_addr) == 0 && InstanceAddress()) {
+    name->sin_addr = InstanceAddress();
   }
 
   int ret = bind(native_handle_, (sockaddr*)name, name_len);
@@ -337,6 +389,8 @@ int XSocket::SendTo(uint8_t* buf, uint32_t buf_len, uint32_t flags,
     xnet->SendPacket(this, to, buf, buf_len);
   }
   */
+
+  BindToInstanceAddress();
 
   // to's port and address are numbers (N_XSOCKADDR_IN keeps them as
   // xe::be values); sockaddr_in wants them in network byte order.

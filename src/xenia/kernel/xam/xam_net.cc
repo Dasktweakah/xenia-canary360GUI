@@ -648,8 +648,13 @@ dword_result_t NetDll_XNetGetTitleXnAddr_entry(dword_t caller,
 
   if (cvars::xnet_online) {
     // Basically360: look like a console with DHCP, a gateway, DNS and an
-    // online address.
-    addr_ptr->inaOnline.s_addr = htonl(INADDR_LOOPBACK);
+    // online address: this copy's own (xnet_address) when there is more than
+    // one copy on this PC.
+    const uint32_t own = XSocket::InstanceAddress();
+    if (own) {
+      addr_ptr->ina.s_addr = htonl(own);
+    }
+    addr_ptr->inaOnline.s_addr = htonl(own ? own : INADDR_LOOPBACK);
     addr_ptr->wPortOnline = 1000;
     return 0x02 | 0x08 | 0x20 | 0x40 | 0x80;  // ETHERNET DHCP GATEWAY DNS
                                               // ONLINE

@@ -10,6 +10,7 @@
 #include "xenia/hid/sdl/sdl_input_driver.h"
 
 #include <charconv>
+#include <cstring>
 #include <limits>
 #include <unordered_map>
 
@@ -61,9 +62,79 @@ DEFINE_bool(
     "often puts the controller in your hands on player 2 or 3.",
     "HID");
 
+DEFINE_int32(
+    controller_instance, 0,
+    "For several copies of Xenia on one PC, one copy per player, each in its "
+    "own window (like split screen): this copy's player number, 1 to 4. Each "
+    "copy then takes one controller and ignores the others. A button press on "
+    "a controller no copy has taken goes to the lowest-numbered copy still "
+    "without one, so the players take their copies in order by pressing a "
+    "button: the first press is copy 1's, the next copy 2's. The controller "
+    "is player 1 in its copy. A controller that disconnects goes back to its "
+    "copy when it returns, unless that copy has taken another. 0, the "
+    "default: off, every controller works in this copy.",
+    "HID");
+
 namespace xe {
 namespace hid {
 namespace sdl {
+
+// The table every copy of Xenia with controller_instance set shares: which
+// process runs each player's copy, and the device each one has taken.
+struct SDLInputDriver::InstanceTable {
+  static constexpr uint32_t kMagic = 0x58434931;  // XCI1
+  static constexpr size_t kKeySize = 256;
+  uint32_t magic;
+  uint32_t pid[HID_SDL_USER_COUNT];
+  char key[HID_SDL_USER_COUNT][kKeySize];
+};
+
+namespace {
+
+#if XE_PLATFORM_WIN32
+size_t InstanceIndex() {
+  return static_cast<size_t>(cvars::controller_instance - 1);
+}
+
+bool ProcessRunning(uint32_t pid) {
+  if (!pid) {
+    return false;
+  }
+  if (pid == GetCurrentProcessId()) {
+    return true;
+  }
+  HANDLE process = OpenProcess(SYNCHRONIZE, FALSE, pid);
+  if (!process) {
+    // Denied: it exists (another user's or an elevated process).
+    return GetLastError() == ERROR_ACCESS_DENIED;
+  }
+  const bool running = WaitForSingleObject(process, 0) == WAIT_TIMEOUT;
+  CloseHandle(process);
+  return running;
+}
+
+class InstanceLock {
+ public:
+  explicit InstanceLock(void* mutex) : mutex_(mutex) {
+    if (mutex_) {
+      const DWORD wait = WaitForSingleObject(mutex_, 1000);
+      locked_ = wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED;
+    }
+  }
+  ~InstanceLock() {
+    if (locked_) {
+      ReleaseMutex(mutex_);
+    }
+  }
+  bool locked() const { return locked_; }
+
+ private:
+  void* mutex_;
+  bool locked_ = false;
+};
+#endif  // XE_PLATFORM_WIN32
+
+}  // namespace
 
 SDLInputDriver::SDLInputDriver(xe::ui::Window* window, size_t window_z_order)
     : InputDriver(window, window_z_order),
@@ -76,6 +147,7 @@ SDLInputDriver::SDLInputDriver(xe::ui::Window* window, size_t window_z_order)
       port_reserved_() {}
 
 SDLInputDriver::~SDLInputDriver() {
+  CloseInstanceTable();
   // Make sure the CallInUIThread is executed before destroying the references.
   if (sdl_pumpevents_queued_) {
     window()->app_context().CallInUIThreadSynchronous([this]() {
@@ -109,6 +181,15 @@ X_STATUS SDLInputDriver::Setup() {
   window()->app_context().CallInUIThreadSynchronous([this]() {
     if (!xe::helper::sdl::SDLHelper::Prepare()) {
       return;
+    }
+    if (InstanceMode()) {
+      // The players' copies sit side by side and only one window can have the
+      // focus: every copy keeps reading its controller. (Windows.Gaming.Input
+      // reads nothing for a process in the background; Raw Input and XInput
+      // do.)
+      SDL_SetHint("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1");
+      SDL_SetHint("SDL_JOYSTICK_WGI", "0");
+      OpenInstanceTable();
     }
     // Initialize the event system early, so we catch device events for already
     // connected controllers.
@@ -542,14 +623,22 @@ void SDLInputDriver::OnControllerDeviceAdded(const SDL_Event& event) {
   if (user_id >= 0) {
     auto& state = controllers_.at(user_id);
     state = {controller, {}};
+    state.device_key = DeviceKey(controller);
     port_reserved_.at(user_id) = false;
     // XInput seems to start with packet_number = 1 .
     state.state_changed = true;
     UpdateXCapabilities(state, static_cast<size_t>(user_id));
 
-    XELOGI("SDL OnControllerDeviceAdded: Added at index {}.", user_id);
+    XELOGI("SDL OnControllerDeviceAdded: Added at index {} ({}).", user_id,
+           state.device_key);
     XELOGI("SDL Controller {}: {}", user_id,
            SDL_GameControllerMapping(controller));
+    // controller_instance: this copy's controller is back.
+    if (InstanceMode() && !instance_port_ && !instance_last_key_.empty() &&
+        state.device_key == instance_last_key_ &&
+        ClaimForInstance(state.device_key, true)) {
+      TakeInstanceController(static_cast<size_t>(user_id));
+    }
   } else {
     // No more controllers needed, close it.
     SDL_GameControllerClose(controller);
@@ -561,6 +650,14 @@ void SDLInputDriver::OnControllerDeviceRemoved(const SDL_Event& event) {
   // Find the disconnected gamecontroller and close it.
   auto idx = GetControllerIndexFromInstanceID(event.cdevice.which);
   if (idx) {
+    if (instance_port_ && *instance_port_ == *idx) {
+      // Its copy waits for it to return, or for a press on a free controller.
+      instance_last_key_ = controllers_.at(*idx).device_key;
+      instance_port_.reset();
+      ReleaseInstanceClaim();
+      keystroke_states_.at(0) = {};
+      XELOGI("SDL: this copy's controller disconnected.");
+    }
     // A player's controller keeps its port while it is away (a wireless pad
     // that fell asleep); it is the lowest free port when it comes back.
     port_reserved_.at(*idx) = controllers_.at(*idx).used;
@@ -668,8 +765,18 @@ void SDLInputDriver::OnControllerDeviceButtonChanged(const SDL_Event& event) {
   auto xbutton = xbutton_lookup.at(event.cbutton.button);
   // The Guide button wakes a controller up and opens the dashboard's guide,
   // so it does not count as picking the controller up to play.
-  if (event.cbutton.state == SDL_PRESSED && xbutton != X_INPUT_GAMEPAD_GUIDE &&
-      !controllers_.at(*idx).used) {
+  if (InstanceMode()) {
+    if (!instance_port_ || *instance_port_ != *idx) {
+      // Not this copy's controller: a press may make it so.
+      if (instance_port_ || event.cbutton.state != SDL_PRESSED ||
+          xbutton == X_INPUT_GAMEPAD_GUIDE ||
+          !ClaimForInstance(controllers_.at(*idx).device_key, false)) {
+        return;
+      }
+      TakeInstanceController(*idx);
+    }
+  } else if (event.cbutton.state == SDL_PRESSED &&
+             xbutton != X_INPUT_GAMEPAD_GUIDE && !controllers_.at(*idx).used) {
     idx = ClaimPortOnFirstUse(*idx);
   }
   auto& controller = controllers_.at(*idx);
@@ -725,6 +832,190 @@ size_t SDLInputDriver::ClaimPortOnFirstUse(size_t user_index) {
   return user_index;
 }
 
+bool SDLInputDriver::InstanceMode() {
+  return cvars::controller_instance >= 1 &&
+         cvars::controller_instance <= HID_SDL_USER_COUNT;
+}
+
+void SDLInputDriver::OpenInstanceTable() {
+#if XE_PLATFORM_WIN32
+  if (instance_table_) {
+    return;
+  }
+  instance_mutex_ =
+      CreateMutexW(nullptr, FALSE, L"Local\\XeniaControllerInstancesLock");
+  HANDLE mapping =
+      CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0,
+                         static_cast<DWORD>(sizeof(InstanceTable)),
+                         L"Local\\XeniaControllerInstances");
+  if (!instance_mutex_ || !mapping) {
+    XELOGW("SDL controller_instance: could not open the shared table ({}).",
+           GetLastError());
+    if (mapping) {
+      CloseHandle(mapping);
+    }
+    return;
+  }
+  auto table = static_cast<InstanceTable*>(
+      MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(InstanceTable)));
+  if (!table) {
+    CloseHandle(mapping);
+    return;
+  }
+  instance_mapping_ = mapping;
+  instance_table_ = table;
+  InstanceLock lock(instance_mutex_);
+  if (table->magic != InstanceTable::kMagic) {
+    std::memset(table, 0, sizeof(*table));
+    table->magic = InstanceTable::kMagic;
+  }
+  const size_t me = InstanceIndex();
+  if (table->pid[me] && table->pid[me] != GetCurrentProcessId() &&
+      ProcessRunning(table->pid[me])) {
+    XELOGW(
+        "SDL controller_instance: another copy (process {}) is already player "
+        "{}; this one takes its place.",
+        table->pid[me], me + 1);
+  }
+  table->pid[me] = GetCurrentProcessId();
+  table->key[me][0] = '\0';
+#endif  // XE_PLATFORM_WIN32
+  XELOGI(
+      "SDL controller_instance: this copy is player {}; it takes the next "
+      "controller pressed.",
+      cvars::controller_instance);
+}
+
+void SDLInputDriver::CloseInstanceTable() {
+#if XE_PLATFORM_WIN32
+  if (instance_table_) {
+    {
+      InstanceLock lock(instance_mutex_);
+      const size_t me = InstanceIndex();
+      if (instance_table_->pid[me] == GetCurrentProcessId()) {
+        instance_table_->pid[me] = 0;
+        instance_table_->key[me][0] = '\0';
+      }
+    }
+    UnmapViewOfFile(instance_table_);
+    instance_table_ = nullptr;
+  }
+  if (instance_mapping_) {
+    CloseHandle(instance_mapping_);
+    instance_mapping_ = nullptr;
+  }
+  if (instance_mutex_) {
+    CloseHandle(instance_mutex_);
+    instance_mutex_ = nullptr;
+  }
+#endif  // XE_PLATFORM_WIN32
+}
+
+bool SDLInputDriver::ClaimForInstance(const std::string& device_key,
+                                      bool returning) {
+  if (!InstanceMode() || instance_port_) {
+    return false;
+  }
+#if XE_PLATFORM_WIN32
+  if (instance_table_) {
+    InstanceLock lock(instance_mutex_);
+    if (!lock.locked()) {
+      return false;
+    }
+    auto& table = *instance_table_;
+    const size_t me = InstanceIndex();
+    std::optional<size_t> waiting;
+    for (size_t i = 0; i < HID_SDL_USER_COUNT; i++) {
+      if (i != me && !ProcessRunning(table.pid[i])) {
+        // That copy has closed: its controller is free.
+        table.pid[i] = 0;
+        table.key[i][0] = '\0';
+        continue;
+      }
+      if (i != me && device_key == table.key[i]) {
+        return false;  // another copy's controller
+      }
+      if (!waiting && !table.key[i][0]) {
+        waiting = i;
+      }
+    }
+    if (!returning && waiting != me) {
+      return false;  // a lower-numbered copy takes this one
+    }
+    table.pid[me] = GetCurrentProcessId();
+    std::strncpy(table.key[me], device_key.c_str(),
+                 InstanceTable::kKeySize - 1);
+    table.key[me][InstanceTable::kKeySize - 1] = '\0';
+    return true;
+  }
+#endif          // XE_PLATFORM_WIN32
+  return true;  // no table: this copy takes the first controller pressed
+}
+
+void SDLInputDriver::ReleaseInstanceClaim() {
+#if XE_PLATFORM_WIN32
+  if (instance_table_) {
+    InstanceLock lock(instance_mutex_);
+    const size_t me = InstanceIndex();
+    if (instance_table_->pid[me] == GetCurrentProcessId()) {
+      instance_table_->key[me][0] = '\0';
+    }
+  }
+#endif  // XE_PLATFORM_WIN32
+}
+
+void SDLInputDriver::TakeInstanceController(size_t port) {
+  instance_port_ = port;
+  auto& state = controllers_.at(port);
+  instance_last_key_ = state.device_key;
+  state.used = true;
+  state.state_changed = true;
+  keystroke_states_.at(0) = {};
+  UpdateXCapabilities(state, 0);
+#if SDL_VERSION_ATLEAST(2, 0, 12)
+  SDL_GameControllerSetPlayerIndex(state.sdl, cvars::controller_instance - 1);
+#endif
+  XELOGI("SDL: \"{}\" ({}) is this copy's controller (player {}'s copy).",
+         SDL_GameControllerName(state.sdl), state.device_key,
+         cvars::controller_instance);
+}
+
+std::string SDLInputDriver::DeviceKey(SDL_GameController* controller) const {
+  auto joystick = SDL_GameControllerGetJoystick(controller);
+  std::string base;
+#if SDL_VERSION_ATLEAST(2, 24, 0)
+  if (const char* path = SDL_JoystickPath(joystick)) {
+    base = path;
+  }
+#endif
+  if (base.empty()) {
+    char guid[33];
+    SDL_JoystickGetGUIDString(SDL_JoystickGetGUID(joystick), guid,
+                              sizeof(guid));
+    base = guid;
+#if SDL_VERSION_ATLEAST(2, 0, 14)
+    if (const char* serial = SDL_JoystickGetSerial(joystick)) {
+      base += "/";
+      base += serial;
+    }
+#endif
+  }
+  // Two devices can look the same (no path, the same model): number them.
+  for (size_t n = 0;; n++) {
+    std::string key = base + "#" + std::to_string(n);
+    bool taken = false;
+    for (const auto& other : controllers_) {
+      if (other.sdl && other.sdl != controller && other.device_key == key) {
+        taken = true;
+        break;
+      }
+    }
+    if (!taken) {
+      return key;
+    }
+  }
+}
+
 std::optional<size_t> SDLInputDriver::GetControllerIndexFromInstanceID(
     SDL_JoystickID instance_id) {
   // Loop through our controllers and try to match the given ID.
@@ -748,6 +1039,13 @@ SDLInputDriver::ControllerState* SDLInputDriver::GetControllerState(
     uint32_t user_index) {
   if (user_index >= controllers_.size()) {
     return nullptr;
+  }
+  if (InstanceMode()) {
+    // Only this copy's controller, as player 1.
+    if (user_index != 0 || !instance_port_) {
+      return nullptr;
+    }
+    user_index = static_cast<uint32_t>(*instance_port_);
   }
   auto controller = &controllers_.at(user_index);
   if (!controller->sdl) {

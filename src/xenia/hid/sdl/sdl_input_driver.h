@@ -14,6 +14,7 @@
 #include <atomic>
 #include <mutex>
 #include <optional>
+#include <string>
 
 #include "SDL.h"
 #include "third_party/rapidcsv/src/rapidcsv.h"
@@ -60,6 +61,9 @@ class SDLInputDriver final : public InputDriver {
     bool whammy_seen;
     // A button (other than Guide) has been pressed since it was connected.
     bool used;
+    // Names the device the same way in every copy of Xenia on this PC (see
+    // controller_instance).
+    std::string device_key;
   };
 
   enum class RepeatState {
@@ -86,6 +90,22 @@ class SDLInputDriver final : public InputDriver {
   // the order the players pick their controllers up. Returns its port.
   size_t ClaimPortOnFirstUse(size_t user_index);
 
+  // controller_instance: several copies of Xenia, one per player, share the
+  // controllers through a table every copy on this PC opens. A copy takes the
+  // first controller pressed that no copy holds, when no lower-numbered copy
+  // is still waiting for one, and shows only that controller, as player 1.
+  struct InstanceTable;
+  static bool InstanceMode();
+  void OpenInstanceTable();
+  void CloseInstanceTable();
+  // Takes the device for this copy if the table allows: nobody else holds it,
+  // and (unless it is this copy's own controller coming back) this is the
+  // lowest-numbered running copy without a controller.
+  bool ClaimForInstance(const std::string& device_key, bool returning);
+  void ReleaseInstanceClaim();
+  void TakeInstanceController(size_t port);
+  std::string DeviceKey(SDL_GameController* controller) const;
+
   inline uint64_t AnalogToKeyfield(const X_INPUT_GAMEPAD& gamepad) const;
   std::optional<size_t> GetControllerIndexFromInstanceID(
       SDL_JoystickID instance_id);
@@ -107,6 +127,13 @@ class SDLInputDriver final : public InputDriver {
   std::array<KeystrokeState, HID_SDL_USER_COUNT> keystroke_states_;
   // Ports whose used controller went away, kept for it to come back to.
   std::array<bool, HID_SDL_USER_COUNT> port_reserved_;
+  // controller_instance: the port of this copy's controller, the device it
+  // had last (to take back when it reconnects), and the shared table.
+  std::optional<size_t> instance_port_;
+  std::string instance_last_key_;
+  InstanceTable* instance_table_ = nullptr;
+  void* instance_mapping_ = nullptr;
+  void* instance_mutex_ = nullptr;
 };
 
 }  // namespace sdl

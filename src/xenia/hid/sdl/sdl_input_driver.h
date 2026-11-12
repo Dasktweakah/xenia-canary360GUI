@@ -58,6 +58,8 @@ class SDLInputDriver final : public InputDriver {
     bool whammy_on_trigger;
     // The whammy has moved, so the stick holds the device's value.
     bool whammy_seen;
+    // A button (other than Guide) has been pressed since it was connected.
+    bool used;
   };
 
   enum class RepeatState {
@@ -79,6 +81,10 @@ class SDLInputDriver final : public InputDriver {
   void OnControllerDeviceRemoved(const SDL_Event& event);
   void OnControllerDeviceAxisMotion(const SDL_Event& event);
   void OnControllerDeviceButtonChanged(const SDL_Event& event);
+  // A controller's first button press: it moves to the lowest port that no
+  // other used controller holds (swapping with an unused one), so ports go in
+  // the order the players pick their controllers up. Returns its port.
+  size_t ClaimPortOnFirstUse(size_t user_index);
 
   inline uint64_t AnalogToKeyfield(const X_INPUT_GAMEPAD& gamepad) const;
   std::optional<size_t> GetControllerIndexFromInstanceID(
@@ -99,6 +105,8 @@ class SDLInputDriver final : public InputDriver {
   std::atomic<bool> sdl_pumpevents_queued_;
   std::array<ControllerState, HID_SDL_USER_COUNT> controllers_;
   std::array<KeystrokeState, HID_SDL_USER_COUNT> keystroke_states_;
+  // Ports whose used controller went away, kept for it to come back to.
+  std::array<bool, HID_SDL_USER_COUNT> port_reserved_;
 };
 
 }  // namespace sdl

@@ -51,6 +51,16 @@ DEFINE_string(
     "default, changes nothing.",
     "HID");
 
+DEFINE_bool(
+    controller_ports_by_first_use, true,
+    "Controller ports go by which controller is used first: the first one to "
+    "press a button is player 1, the next player 2, and so on, and "
+    "controllers nobody has pressed anything on yet fill the ports after "
+    "them. A controller that disconnects gets its port back when it returns. "
+    "Off: ports follow the order Windows lists the controllers in, which "
+    "often puts the controller in your hands on player 2 or 3.",
+    "HID");
+
 namespace xe {
 namespace hid {
 namespace sdl {
@@ -62,7 +72,8 @@ SDLInputDriver::SDLInputDriver(xe::ui::Window* window, size_t window_z_order)
       sdl_events_unflushed_(0),
       sdl_pumpevents_queued_(false),
       controllers_(),
-      keystroke_states_() {}
+      keystroke_states_(),
+      port_reserved_() {}
 
 SDLInputDriver::~SDLInputDriver() {
   // Make sure the CallInUIThread is executed before destroying the references.
@@ -504,8 +515,12 @@ void SDLInputDriver::OnControllerDeviceAdded(const SDL_Event& event) {
       guid_str);
   int user_id = -1;
 #if SDL_VERSION_ATLEAST(2, 0, 9)
-  // Check if the controller has a player index LED.
-  user_id = SDL_GameControllerGetPlayerIndex(controller);
+  // Check if the controller has a player index LED. (With ports by first use
+  // this is not asked: Windows' XInput slot order is not the order the players
+  // picked their controllers up.)
+  if (!cvars::controller_ports_by_first_use) {
+    user_id = SDL_GameControllerGetPlayerIndex(controller);
+  }
   // Is that id already taken?
   if (user_id < 0 || user_id >= controllers_.size() ||
       controllers_.at(user_id).sdl) {
@@ -527,6 +542,7 @@ void SDLInputDriver::OnControllerDeviceAdded(const SDL_Event& event) {
   if (user_id >= 0) {
     auto& state = controllers_.at(user_id);
     state = {controller, {}};
+    port_reserved_.at(user_id) = false;
     // XInput seems to start with packet_number = 1 .
     state.state_changed = true;
     UpdateXCapabilities(state, static_cast<size_t>(user_id));
@@ -545,6 +561,9 @@ void SDLInputDriver::OnControllerDeviceRemoved(const SDL_Event& event) {
   // Find the disconnected gamecontroller and close it.
   auto idx = GetControllerIndexFromInstanceID(event.cdevice.which);
   if (idx) {
+    // A player's controller keeps its port while it is away (a wireless pad
+    // that fell asleep); it is the lowest free port when it comes back.
+    port_reserved_.at(*idx) = controllers_.at(*idx).used;
     SDL_GameControllerClose(controllers_.at(*idx).sdl);
     controllers_.at(*idx) = {};
     keystroke_states_.at(*idx) = {};
@@ -639,9 +658,7 @@ void SDLInputDriver::OnControllerDeviceButtonChanged(const SDL_Event& event) {
 
   auto idx = GetControllerIndexFromInstanceID(event.cbutton.which);
   assert(idx);
-  auto& controller = controllers_.at(*idx);
 
-  uint16_t xbuttons = controller.state.gamepad.buttons;
   // Lookup the XInput button code.
   if (event.cbutton.button >= xbutton_lookup.size()) {
     // A newer SDL Version may have added new buttons.
@@ -649,6 +666,15 @@ void SDLInputDriver::OnControllerDeviceButtonChanged(const SDL_Event& event) {
     return;
   }
   auto xbutton = xbutton_lookup.at(event.cbutton.button);
+  // The Guide button wakes a controller up and opens the dashboard's guide,
+  // so it does not count as picking the controller up to play.
+  if (event.cbutton.state == SDL_PRESSED && xbutton != X_INPUT_GAMEPAD_GUIDE &&
+      !controllers_.at(*idx).used) {
+    idx = ClaimPortOnFirstUse(*idx);
+  }
+  auto& controller = controllers_.at(*idx);
+
+  uint16_t xbuttons = controller.state.gamepad.buttons;
   // Pressed or released?
   if (event.cbutton.state == SDL_PRESSED) {
     if (xbutton == X_INPUT_GAMEPAD_GUIDE && !cvars::guide_button) {
@@ -660,6 +686,43 @@ void SDLInputDriver::OnControllerDeviceButtonChanged(const SDL_Event& event) {
   }
   controller.state.gamepad.buttons = xbuttons;
   controller.state_changed = true;
+}
+
+size_t SDLInputDriver::ClaimPortOnFirstUse(size_t user_index) {
+  controllers_.at(user_index).used = true;
+  if (!cvars::controller_ports_by_first_use) {
+    return user_index;
+  }
+  for (size_t port = 0; port < user_index; port++) {
+    const auto& other = controllers_.at(port);
+    const bool free = other.sdl ? !other.used : !port_reserved_.at(port);
+    if (!free) {
+      continue;
+    }
+    std::swap(controllers_.at(port), controllers_.at(user_index));
+    // Neither had a key down for the game yet; the press that moved this
+    // controller arrives as a fresh key down on its new port.
+    keystroke_states_.at(port) = {};
+    keystroke_states_.at(user_index) = {};
+    for (size_t i : {port, user_index}) {
+      auto& state = controllers_.at(i);
+      if (!state.sdl) {
+        continue;
+      }
+      state.state_changed = true;
+      UpdateXCapabilities(state, i);
+#if SDL_VERSION_ATLEAST(2, 0, 12)
+      SDL_GameControllerSetPlayerIndex(state.sdl, static_cast<int>(i));
+#endif
+    }
+    XELOGI(
+        "SDL: \"{}\" was the next controller used, so it is now player {} "
+        "(was on port {}).",
+        SDL_GameControllerName(controllers_.at(port).sdl), port + 1,
+        user_index + 1);
+    return port;
+  }
+  return user_index;
 }
 
 std::optional<size_t> SDLInputDriver::GetControllerIndexFromInstanceID(

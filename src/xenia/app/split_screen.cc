@@ -82,6 +82,23 @@ uint32_t ParseAddress(const std::string& text) {
   return uint32_t(std::strtoul(text.c_str(), nullptr, 16));
 }
 
+// The host memory behind a 32-bit guest flag, if its page is committed. The
+// protection the heap records isn't checked: a patch's data in a title's image
+// (where the game itself reads and writes the flag) may be recorded as no
+// access while it's in fact read-write.
+uint8_t* GuestFlag(Memory* memory, uint32_t address) {
+  if (!memory || !address) {
+    return nullptr;
+  }
+  BaseHeap* heap = memory->LookupHeap(address);
+  HeapAllocationInfo info;
+  if (!heap || !heap->QueryRegionInfo(address & ~uint32_t(3), &info) ||
+      !(info.state & kMemoryAllocationCommit)) {
+    return nullptr;
+  }
+  return memory->TranslateVirtual<uint8_t*>(address);
+}
+
 #if XE_PLATFORM_WIN32
 bool ProcessRunning(uint32_t pid) {
   if (!pid) {
@@ -404,46 +421,35 @@ void SplitScreen::ApplyPlacement(const Placement& placement) {
 }
 
 void SplitScreen::WriteGuestStrip(bool strip) {
-  const uint32_t address = ParseAddress(cvars::split_screen_strip_address);
-  Memory* memory = emulator_->memory();
-  if (!address || !memory || !emulator_->is_title_open()) {
+  if (!emulator_->is_title_open()) {
     return;
   }
-  BaseHeap* heap = memory->LookupHeap(address);
-  uint32_t protect = 0;
-  if (!heap || !heap->QueryProtect(address, &protect) ||
-      !(protect & kMemoryProtectRead)) {
+  uint8_t* host = GuestFlag(emulator_->memory(),
+                            ParseAddress(cvars::split_screen_strip_address));
+  if (!host) {
     return;
   }
-  uint8_t* host = memory->TranslateVirtual<uint8_t*>(address);
   const uint32_t value = strip ? 1 : 0;
-  if (xe::load_and_swap<uint32_t>(host) == value) {
-    return;
+  if (xe::load_and_swap<uint32_t>(host) != value) {
+    xe::store_and_swap<uint32_t>(host, value);
   }
-  heap->Protect(address, 4, kMemoryProtectRead | kMemoryProtectWrite);
-  xe::store_and_swap<uint32_t>(host, value);
-  heap->Protect(address, 4, protect);
 }
 
 bool SplitScreen::ReadGuestJoinOpen() {
-  const uint32_t address = ParseAddress(cvars::split_screen_join_address);
-  Memory* memory = emulator_->memory();
-  if (!address || !memory || !emulator_->is_title_open()) {
+  if (!emulator_->is_title_open()) {
     return false;
   }
-  BaseHeap* heap = memory->LookupHeap(address);
-  uint32_t protect = 0;
-  if (!heap || !heap->QueryProtect(address, &protect) ||
-      !(protect & kMemoryProtectRead)) {
+  const uint32_t address = ParseAddress(cvars::split_screen_join_address);
+  const uint8_t* host = GuestFlag(emulator_->memory(), address);
+  if (!host) {
     if (!join_read_failure_logged_) {
-      XELOGW("split_screen: can't read split_screen_join_address {:08X} ({})",
-             address, protect);
+      XELOGW("split_screen: can't read split_screen_join_address {:08X} yet",
+             address);
       join_read_failure_logged_ = true;
     }
     return false;
   }
-  return xe::load_and_swap<uint32_t>(
-             memory->TranslateVirtual<const uint8_t*>(address)) != 0;
+  return xe::load_and_swap<uint32_t>(host) != 0;
 }
 
 void SplitScreen::RunScript() {

@@ -21,6 +21,10 @@ namespace sdl {
 std::unique_ptr<InputDriver> Create(xe::ui::Window* window,
                                     size_t window_z_order);
 
+// Basically360: reads the controllers now, in the UI thread (for a copy whose
+// game is paused and so doesn't ask for them). Nothing if SDL isn't set up.
+void PumpEvents();
+
 }  // namespace sdl
 }  // namespace hid
 }  // namespace xe

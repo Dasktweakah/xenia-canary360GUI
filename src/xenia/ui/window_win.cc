@@ -21,6 +21,7 @@
 #include "xenia/ui/windowed_app_context_win.h"
 
 #include <cstdlib>
+#include <cwchar>
 
 #include <Dbt.h>
 #include <ShellScalingApi.h>
@@ -252,8 +253,11 @@ bool Win32Window::OpenImpl() {
     }
   }
 
-  // Finally show the window.
-  ShowWindow(hwnd_, SW_SHOWNORMAL);
+  // Finally show the window (unless it's a split screen copy waiting for its
+  // player).
+  if (!split_screen_placement_set_ || split_screen_visible_) {
+    ShowWindow(hwnd_, SW_SHOWNORMAL);
+  }
 
   // Report the initial actual state after opening, messages for which might
   // have missed if they were processed during CreateWindowExW when the HWND was
@@ -354,6 +358,18 @@ void Win32Window::ApplyNewFullscreen() {
       return;
     }
   } else {
+    // Basically360: no longer above the taskbar.
+    StopWindowRectTopmost();
+    if (window_rect_topmost_) {
+      window_rect_topmost_ = false;
+      SetWindowPos(
+          hwnd_, HWND_NOTOPMOST, 0, 0, 0, 0,
+          SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+      if (destruction_receiver.IsWindowDestroyedOrClosed()) {
+        return;
+      }
+    }
+
     // Changing the style and the menu may change the size too, don't handle
     // the resize multiple times (also potentially with the listeners changing
     // the desired fullscreen if called from the handling of some message like
@@ -663,47 +679,12 @@ void Win32Window::ApplyFullscreenEntry(
     OnDesiredFullscreenUpdate(false);
     return;
   }
-  // Basically360: full screen in a part of the desktop (window_rect).
-  if (!cvars::window_rect.empty()) {
-    const RECT monitor = monitor_info.rcMonitor;
-    const LONG monitor_size[] = {monitor.right - monitor.left,
-                                 monitor.bottom - monitor.top};
-    const LONG monitor_origin[] = {monitor.left, monitor.top};
-    LONG rect[4];
-    size_t parsed = 0;
-    const char* text = cvars::window_rect.c_str();
-    while (parsed < 4) {
-      char* end = nullptr;
-      const double value = std::strtod(text, &end);
-      if (end == text) {
-        break;
-      }
-      // Odd entries are heights and y, even ones widths and x.
-      const size_t axis = parsed & 1;
-      if (*end == '%') {
-        rect[parsed] =
-            static_cast<LONG>(value * monitor_size[axis] / 100.0 + 0.5) +
-            (parsed < 2 ? monitor_origin[axis] : 0);
-        end++;
-      } else {
-        rect[parsed] = static_cast<LONG>(value);
-      }
-      parsed++;
-      while (*end == ' ') {
-        end++;
-      }
-      if (parsed < 4 && *end != ',') {
-        break;
-      }
-      text = end + (parsed < 4 ? 1 : 0);
-    }
-    if (parsed == 4 && rect[2] > 0 && rect[3] > 0) {
-      monitor_info.rcMonitor.left = rect[0];
-      monitor_info.rcMonitor.top = rect[1];
-      monitor_info.rcMonitor.right = rect[0] + rect[2];
-      monitor_info.rcMonitor.bottom = rect[1] + rect[3];
-    } else {
-      XELOGE("window_rect \"{}\" is not x,y,width,height", cvars::window_rect);
+  // Basically360: full screen in a part of the desktop (split screen or
+  // window_rect).
+  {
+    RECT part;
+    if (GetFullscreenRect(monitor_info.rcMonitor, part)) {
+      monitor_info.rcMonitor = part;
     }
   }
   // Preserve values for DPI rescaling of the window in the non-maximized state
@@ -759,8 +740,12 @@ void Win32Window::ApplyFullscreenEntry(
   // state change that sometimes helps, sometimes doesn't, even if it becomes
   // borderless fullscreen again - this occurs sometimes at least on Windows 11
   // 21H2 on Nvidia GeForce GTX 1070 on driver version 472.12.
-  SetWindowPos(hwnd_, HWND_TOP, monitor_info.rcMonitor.left,
-               monitor_info.rcMonitor.top,
+  // Basically360: a window_rect part of the screen doesn't count as full
+  // screen for Windows, which keeps the taskbar in front - stay topmost.
+  const bool window_rect_topmost =
+      split_screen_placement_set_ || !cvars::window_rect.empty();
+  SetWindowPos(hwnd_, window_rect_topmost ? HWND_TOPMOST : HWND_TOP,
+               monitor_info.rcMonitor.left, monitor_info.rcMonitor.top,
                monitor_info.rcMonitor.right - monitor_info.rcMonitor.left,
                monitor_info.rcMonitor.bottom - monitor_info.rcMonitor.top,
                SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
@@ -769,6 +754,10 @@ void Win32Window::ApplyFullscreenEntry(
       EndBatchedSizeUpdate(destruction_receiver);
     }
     return;
+  }
+  if (window_rect_topmost) {
+    window_rect_topmost_ = true;
+    StartWindowRectTopmost();
   }
 
   EndBatchedSizeUpdate(destruction_receiver);
@@ -1051,6 +1040,155 @@ void Win32Window::AutoHideCursorTimerCallback(void* parameter,
               window.last_cursor_auto_hide_signaled, 0);
 }
 
+bool Win32Window::GetFullscreenRect(const RECT& monitor, RECT& rect_out) const {
+  const LONG monitor_size[] = {monitor.right - monitor.left,
+                               monitor.bottom - monitor.top};
+  const LONG monitor_origin[] = {monitor.left, monitor.top};
+  LONG rect[4];
+  if (split_screen_placement_set_) {
+    for (size_t i = 0; i < 4; ++i) {
+      const size_t axis = i & 1;
+      rect[i] = static_cast<LONG>(double(split_screen_rect_[i]) *
+                                      double(monitor_size[axis]) / 100.0 +
+                                  0.5) +
+                (i < 2 ? monitor_origin[axis] : 0);
+    }
+  } else {
+    if (cvars::window_rect.empty()) {
+      return false;
+    }
+    size_t parsed = 0;
+    const char* text = cvars::window_rect.c_str();
+    while (parsed < 4) {
+      char* end = nullptr;
+      const double value = std::strtod(text, &end);
+      if (end == text) {
+        break;
+      }
+      // Odd entries are heights and y, even ones widths and x.
+      const size_t axis = parsed & 1;
+      if (*end == '%') {
+        rect[parsed] =
+            static_cast<LONG>(value * monitor_size[axis] / 100.0 + 0.5) +
+            (parsed < 2 ? monitor_origin[axis] : 0);
+        end++;
+      } else {
+        rect[parsed] = static_cast<LONG>(value);
+      }
+      parsed++;
+      while (*end == ' ') {
+        end++;
+      }
+      if (parsed < 4 && *end != ',') {
+        break;
+      }
+      text = end + (parsed < 4 ? 1 : 0);
+    }
+    if (parsed != 4) {
+      XELOGE("window_rect \"{}\" is not x,y,width,height", cvars::window_rect);
+      return false;
+    }
+  }
+  if (rect[2] <= 0 || rect[3] <= 0) {
+    return false;
+  }
+  rect_out.left = rect[0];
+  rect_out.top = rect[1];
+  rect_out.right = rect[0] + rect[2];
+  rect_out.bottom = rect[1] + rect[3];
+  return true;
+}
+
+void Win32Window::SetSplitScreenPlacement(bool visible,
+                                          const float rect_percent[4]) {
+  split_screen_placement_set_ = true;
+  split_screen_visible_ = visible;
+  for (size_t i = 0; i < 4; ++i) {
+    split_screen_rect_[i] = rect_percent[i];
+  }
+  if (!hwnd_) {
+    // Applied when the window is opened.
+    return;
+  }
+  if (!visible) {
+    ShowWindow(hwnd_, SW_HIDE);
+    return;
+  }
+  if (!IsFullscreen()) {
+    if (!IsWindowVisible(hwnd_)) {
+      ShowWindow(hwnd_, SW_SHOWNOACTIVATE);
+    }
+    return;
+  }
+  HMONITOR monitor = MonitorFromWindow(hwnd_, MONITOR_DEFAULTTOPRIMARY);
+  MONITORINFO monitor_info;
+  monitor_info.cbSize = sizeof(monitor_info);
+  RECT part;
+  if (!monitor || !GetMonitorInfo(monitor, &monitor_info) ||
+      !GetFullscreenRect(monitor_info.rcMonitor, part)) {
+    return;
+  }
+  window_rect_topmost_ = true;
+  SetWindowPos(hwnd_, HWND_TOPMOST, part.left, part.top, part.right - part.left,
+               part.bottom - part.top,
+               SWP_NOOWNERZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+  StartWindowRectTopmost();
+}
+
+void Win32Window::StartWindowRectTopmost() {
+  if (window_rect_topmost_timer_ || !hwnd_) {
+    return;
+  }
+  window_rect_topmost_hwnd_ = hwnd_;
+  // A timer queue timer posting a message rather than WM_TIMER, which is never
+  // received while WM_PAINT is sent continuously.
+  if (!CreateTimerQueueTimer(&window_rect_topmost_timer_, nullptr,
+                             WindowRectTopmostTimerCallback, this, 1000, 1000,
+                             WT_EXECUTEINTIMERTHREAD)) {
+    window_rect_topmost_timer_ = nullptr;
+  }
+}
+
+void Win32Window::StopWindowRectTopmost() {
+  if (window_rect_topmost_timer_) {
+    // Wait for a callback in progress, so it doesn't post after this.
+    DeleteTimerQueueTimer(nullptr, window_rect_topmost_timer_,
+                          INVALID_HANDLE_VALUE);
+    window_rect_topmost_timer_ = nullptr;
+  }
+}
+
+void NTAPI Win32Window::WindowRectTopmostTimerCallback(
+    void* parameter, BOOLEAN timer_or_wait_fired) {
+  if (!timer_or_wait_fired) {
+    return;
+  }
+  const Win32Window& window = *static_cast<const Win32Window*>(parameter);
+  PostMessage(window.window_rect_topmost_hwnd_, kUserMessageWindowRectTopmost,
+              0, 0);
+}
+
+void Win32Window::UpdateWindowRectTopmost() {
+  if (!hwnd_ || !window_rect_topmost_timer_ || !IsWindowVisible(hwnd_)) {
+    return;
+  }
+  // Above everything (the taskbar included) while a copy of Xenia is in front,
+  // like any other window when something else is, such as a chat app.
+  bool xenia_in_front = false;
+  HWND foreground = GetForegroundWindow();
+  if (foreground) {
+    wchar_t class_name[32];
+    xenia_in_front = GetClassNameW(foreground, class_name, 32) &&
+                     !std::wcscmp(class_name, L"XeniaWindowClass");
+  }
+  if (xenia_in_front || window_rect_topmost_) {
+    window_rect_topmost_ = xenia_in_front;
+    SetWindowPos(hwnd_, xenia_in_front ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0,
+                 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+  }
+}
+
 LRESULT Win32Window::WndProc(HWND hWnd, UINT message, WPARAM wParam,
                              LPARAM lParam) {
   if (message >= WM_MOUSEFIRST && message <= WM_MOUSELAST) {
@@ -1079,6 +1217,7 @@ LRESULT Win32Window::WndProc(HWND hWnd, UINT message, WPARAM wParam,
         DeleteTimerQueueTimer(nullptr, cursor_auto_hide_timer_, nullptr);
         cursor_auto_hide_timer_ = nullptr;
       }
+      StopWindowRectTopmost();
       {
         WindowDestructionReceiver destruction_receiver(this);
         OnBeforeClose(destruction_receiver);
@@ -1259,6 +1398,11 @@ LRESULT Win32Window::WndProc(HWND hWnd, UINT message, WPARAM wParam,
       // For the non-client area, and for visible cursor, letting normal
       // processing happen, setting the cursor to an arrow or to something
       // specific to non-client parts of the window.
+    } break;
+
+    case kUserMessageWindowRectTopmost: {
+      UpdateWindowRectTopmost();
+      return 0;
     } break;
 
     case kUserMessageAutoHideCursor: {

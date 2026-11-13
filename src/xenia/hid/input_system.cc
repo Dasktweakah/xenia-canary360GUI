@@ -126,6 +126,15 @@ X_RESULT InputSystem::GetState(uint32_t user_index, uint32_t flags,
     if (result == X_ERROR_SUCCESS) {
       UpdateUsedSlot(driver, user_index, true);
       AdjustDeadzoneLevels(user_index, &out_state->gamepad);
+      if (user_index == 0) {
+        std::lock_guard<std::mutex> scripted_lock(scripted_mutex_);
+        if (scripted_buttons_ || scripted_changes_) {
+          out_state->gamepad.buttons =
+              uint16_t(out_state->gamepad.buttons) | scripted_buttons_;
+          out_state->packet_number =
+              uint32_t(out_state->packet_number) + scripted_changes_;
+        }
+      }
 
       if (out_state->gamepad.buttons != 0) {
         last_used_slot = user_index;
@@ -156,6 +165,20 @@ X_RESULT InputSystem::GetKeystroke(uint32_t user_index, uint32_t flags,
 
   std::vector<InputDriver*> filtered_drivers = FilterDrivers(flags);
 
+  if (user_index == 0 || user_index == XUserIndexAny) {
+    std::lock_guard<std::mutex> scripted_lock(scripted_mutex_);
+    if (!scripted_keystrokes_.empty()) {
+      const auto keystroke = scripted_keystrokes_.front();
+      scripted_keystrokes_.pop_front();
+      out_keystroke->virtual_key = keystroke.first;
+      out_keystroke->unicode = 0;
+      out_keystroke->flags = keystroke.second;
+      out_keystroke->user_index = 0;
+      out_keystroke->hid_code = 0;
+      return X_ERROR_SUCCESS;
+    }
+  }
+
   bool any_connected = false;
   for (auto& driver : filtered_drivers) {
     // connected_slots
@@ -177,6 +200,32 @@ X_RESULT InputSystem::GetKeystroke(uint32_t user_index, uint32_t flags,
     }
   }
   return any_connected ? X_ERROR_EMPTY : X_ERROR_DEVICE_NOT_CONNECTED;
+}
+
+void InputSystem::SetScriptedButtons(uint16_t buttons) {
+  // X_INPUT_GAMEPAD_* bit -> VK_PAD_*.
+  static const std::pair<uint16_t, uint16_t> kKeys[] = {
+      {0x1000, 0x5800}, {0x2000, 0x5801}, {0x4000, 0x5802}, {0x8000, 0x5803},
+      {0x0200, 0x5804}, {0x0100, 0x5805}, {0x0001, 0x5810}, {0x0002, 0x5811},
+      {0x0004, 0x5812}, {0x0008, 0x5813}, {0x0010, 0x5814}, {0x0020, 0x5815},
+  };
+  std::lock_guard<std::mutex> scripted_lock(scripted_mutex_);
+  const uint16_t changed = uint16_t(scripted_buttons_ ^ buttons);
+  if (!changed) {
+    return;
+  }
+  for (const auto& key : kKeys) {
+    if (changed & key.first) {
+      // XINPUT_KEYSTROKE_KEYDOWN 1, XINPUT_KEYSTROKE_KEYUP 2.
+      scripted_keystrokes_.emplace_back(key.second,
+                                        (buttons & key.first) ? 1 : 2);
+    }
+  }
+  while (scripted_keystrokes_.size() > 64) {
+    scripted_keystrokes_.pop_front();
+  }
+  scripted_buttons_ = buttons;
+  ++scripted_changes_;
 }
 
 bool InputSystem::GetVibrationCvar() { return cvars::vibration; }

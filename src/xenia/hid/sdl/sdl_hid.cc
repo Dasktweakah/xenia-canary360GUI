@@ -20,6 +20,12 @@ std::unique_ptr<InputDriver> Create(xe::ui::Window* window,
   return std::make_unique<SDLInputDriver>(window, window_z_order);
 }
 
+void PumpEvents() {
+  if (SDL_WasInit(SDL_INIT_GAMECONTROLLER)) {
+    SDL_PumpEvents();
+  }
+}
+
 }  // namespace sdl
 }  // namespace hid
 }  // namespace xe

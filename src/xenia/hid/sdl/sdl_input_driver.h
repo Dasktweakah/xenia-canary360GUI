@@ -18,6 +18,7 @@
 
 #include "SDL.h"
 #include "third_party/rapidcsv/src/rapidcsv.h"
+#include "xenia/hid/controller_instances.h"
 #include "xenia/hid/input_driver.h"
 
 #define HID_SDL_USER_COUNT 4
@@ -94,7 +95,7 @@ class SDLInputDriver final : public InputDriver {
   // controllers through a table every copy on this PC opens. A copy takes the
   // first controller pressed that no copy holds, when no lower-numbered copy
   // is still waiting for one, and shows only that controller, as player 1.
-  struct InstanceTable;
+  using InstanceTable = ControllerInstanceTable;
   static bool InstanceMode();
   void OpenInstanceTable();
   void CloseInstanceTable();

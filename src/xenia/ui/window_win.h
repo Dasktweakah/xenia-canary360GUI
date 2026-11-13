@@ -40,6 +40,11 @@ class Win32Window : public Window {
 
   uint32_t GetMediumDpi() const override;
 
+  // Basically360 (live split screen): where this copy's full screen window
+  // goes, as x, y, width, height in percent of its monitor, or hidden. Takes
+  // the place of window_rect. May be set before the window is opened.
+  void SetSplitScreenPlacement(bool visible, const float rect_percent[4]);
+
  protected:
   bool OpenImpl() override;
   void RequestCloseImpl() override;
@@ -65,6 +70,7 @@ class Win32Window : public Window {
  private:
   enum : UINT {
     kUserMessageAutoHideCursor = WM_USER,
+    kUserMessageWindowRectTopmost,
   };
 
   BOOL AdjustWindowRectangle(RECT& rect, DWORD style, BOOL menu, DWORD ex_style,
@@ -94,6 +100,17 @@ class Win32Window : public Window {
   void SetCursorAutoHideTimer();
   static void NTAPI AutoHideCursorTimerCallback(void* parameter,
                                                 BOOLEAN timer_or_wait_fired);
+
+  // Basically360: full screen in a window_rect part of the screen stays above
+  // the taskbar while a copy of Xenia is the window in front.
+  // The part of the monitor for full screen from split screen or window_rect.
+  // False if neither is set.
+  bool GetFullscreenRect(const RECT& monitor, RECT& rect_out) const;
+  void StartWindowRectTopmost();
+  void StopWindowRectTopmost();
+  void UpdateWindowRectTopmost();
+  static void NTAPI WindowRectTopmostTimerCallback(void* parameter,
+                                                   BOOLEAN timer_or_wait_fired);
 
   static LRESULT CALLBACK WndProcThunk(HWND hWnd, UINT message, WPARAM wParam,
                                        LPARAM lParam);
@@ -154,6 +171,15 @@ class Win32Window : public Window {
   bool cursor_currently_auto_hidden_ = false;
 
   HDEVNOTIFY usb_device_notify_ = nullptr;
+
+  HANDLE window_rect_topmost_timer_ = nullptr;
+  // The window the timer callback posts to, as hwnd_ is nulled while closing.
+  HWND window_rect_topmost_hwnd_ = nullptr;
+  bool window_rect_topmost_ = false;
+
+  bool split_screen_placement_set_ = false;
+  bool split_screen_visible_ = true;
+  float split_screen_rect_[4] = {0.0f, 0.0f, 100.0f, 100.0f};
 };
 
 class Win32MenuItem : public MenuItem {

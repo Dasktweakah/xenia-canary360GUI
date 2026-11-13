@@ -11,7 +11,9 @@
 #define XENIA_HID_INPUT_SYSTEM_H_
 
 #include <bitset>
+#include <deque>
 #include <memory>
+#include <mutex>
 #include <vector>
 #include "xenia/base/mutex.h"
 #include "xenia/hid/input.h"
@@ -44,6 +46,11 @@ class InputSystem {
   X_RESULT GetState(uint32_t user_index, uint32_t flags,
                     X_INPUT_STATE* out_state);
   X_RESULT SetState(uint32_t user_index, X_INPUT_VIBRATION* vibration);
+  // Basically360: buttons pressed by Xenia itself on player 1's controller
+  // (X_INPUT_GAMEPAD_* bits), added to what the controller sends, also as
+  // keystrokes (live split screen: a player joining is taken to the match).
+  void SetScriptedButtons(uint16_t buttons);
+
   X_RESULT GetKeystroke(uint32_t user_index, uint32_t flags,
                         X_INPUT_KEYSTROKE* out_keystroke);
 
@@ -62,6 +69,12 @@ class InputSystem {
 
  private:
   typedef std::pair<uint16_t, uint16_t> joystick_value;
+
+  std::mutex scripted_mutex_;
+  uint16_t scripted_buttons_ = 0;
+  uint32_t scripted_changes_ = 0;
+  // Keystrokes from scripted button changes still to be read.
+  std::deque<std::pair<uint16_t, uint16_t>> scripted_keystrokes_;
 
   const std::string controller_slot_state_change_message[2] = {
       "Controller disconnected from slot {}.",

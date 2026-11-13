@@ -14,6 +14,7 @@
 #include <string>
 
 #include "xenia/app/profile_dialogs.h"
+#include "xenia/app/split_screen.h"
 #include "xenia/emulator.h"
 #include "xenia/gpu/command_processor.h"
 #include "xenia/ui/imgui_dialog.h"
@@ -309,6 +310,8 @@ class EmulatorWindow {
   EmulatorWindowListener window_listener_;
   std::unique_ptr<ui::Window> window_;
   std::unique_ptr<ui::ImGuiDrawer> imgui_drawer_;
+  // Basically360: live split screen, if on (destroyed before the window).
+  std::unique_ptr<SplitScreen> split_screen_;
   std::unique_ptr<DisplayConfigGameConfigLoadCallback>
       display_config_game_config_load_callback_;
   // Creation may fail, in this case immediate drawer UI must not be drawn.

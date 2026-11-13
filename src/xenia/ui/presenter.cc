@@ -9,6 +9,9 @@
 
 #include "xenia/ui/presenter.h"
 
+#include <cstdlib>
+#include <mutex>
+
 #include "xenia/base/assert.h"
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
@@ -66,6 +69,13 @@ DEFINE_int32(
     present_safe_area_y, 100,
     "Percentage of the image height that can be kept when presenting to "
     "maintain aspect ratio without letterboxing or stretching.",
+    "Display");
+DEFINE_string(
+    present_crop, "",
+    "Basically360: the part of the game's picture to show, filling the whole "
+    "window, as x,y,width,height in percent of the picture (0,0,100,50 is the "
+    "top half, 0,25,100,50 the middle band). For a copy of a game shown as a "
+    "wide split screen strip. Empty, the default, shows the whole picture.",
     "Display");
 
 namespace xe {
@@ -648,6 +658,58 @@ std::unique_lock<std::mutex> Presenter::ConsumeGuestOutput(
   return std::move(consumer_lock);
 }
 
+namespace {
+std::mutex crop_override_mutex;
+float crop_override[4] = {};
+bool crop_override_set = false;
+
+// The crop in effect: the run time one, else present_crop. False if none.
+bool GetCrop(double crop[4]) {
+  {
+    std::lock_guard<std::mutex> lock(crop_override_mutex);
+    if (crop_override_set) {
+      for (size_t i = 0; i < 4; ++i) {
+        crop[i] = crop_override[i];
+      }
+      return crop[2] > 0.0 && crop[3] > 0.0;
+    }
+  }
+  if (cvars::present_crop.empty()) {
+    return false;
+  }
+  size_t parsed = 0;
+  const char* text = cvars::present_crop.c_str();
+  while (parsed < 4) {
+    char* end = nullptr;
+    crop[parsed] = std::strtod(text, &end);
+    if (end == text) {
+      break;
+    }
+    ++parsed;
+    while (*end == ' ' || *end == '%') {
+      ++end;
+    }
+    if (parsed < 4) {
+      if (*end != ',') {
+        break;
+      }
+      ++end;
+    }
+    text = end;
+  }
+  return parsed == 4 && crop[2] > 0.0 && crop[3] > 0.0;
+}
+}  // namespace
+
+void Presenter::SetCropOverride(float x, float y, float width, float height) {
+  std::lock_guard<std::mutex> lock(crop_override_mutex);
+  crop_override[0] = x;
+  crop_override[1] = y;
+  crop_override[2] = width;
+  crop_override[3] = height;
+  crop_override_set = true;
+}
+
 Presenter::GuestOutputPaintFlow Presenter::GetGuestOutputPaintFlow(
     const GuestOutputProperties& properties, uint32_t host_rt_width,
     uint32_t host_rt_height, uint32_t max_rt_width, uint32_t max_rt_height,
@@ -791,6 +853,18 @@ Presenter::GuestOutputPaintFlow Presenter::GetGuestOutputPaintFlow(
     flow.output_x =
         (int32_t(surface_width_in_paint_connection_) - int32_t(output_width)) /
         2;
+  }
+
+  // Basically360: present_crop or the run time crop - stretch the picture so
+  // the chosen part of it fills the surface, the rest is outside the surface.
+  double crop[4];
+  if (GetCrop(crop)) {
+    output_width = uint32_t(
+        double(surface_width_in_paint_connection_) * 100.0 / crop[2] + 0.5);
+    output_height = uint32_t(
+        double(surface_height_in_paint_connection_) * 100.0 / crop[3] + 0.5);
+    flow.output_x = -int32_t(crop[0] * double(output_width) / 100.0 + 0.5);
+    flow.output_y = -int32_t(crop[1] * double(output_height) / 100.0 + 0.5);
   }
 
   // Convert the location from surface pixels (which have 1:1 aspect ratio

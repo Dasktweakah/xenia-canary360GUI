@@ -8,8 +8,46 @@
  */
 #include <cstring>
 
+#include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
+#include "xenia/base/utf8.h"
 #include "xenia/patcher/patcher.h"
+
+DEFINE_string(
+    patches_enable, "",
+    "Basically360: names of game patches to turn on for this run even if "
+    "their patch file has is_enabled = false, separated by |. With several "
+    "copies of a game running side by side, each copy can use its own "
+    "patches.",
+    "General");
+
+namespace {
+// Patch names listed in patches_enable, trimmed, case-insensitive.
+bool IsPatchForceEnabled(const std::string& patch_name) {
+  const std::string& list = cvars::patches_enable;
+  size_t start = 0;
+  while (start <= list.size()) {
+    size_t end = list.find('|', start);
+    if (end == std::string::npos) {
+      end = list.size();
+    }
+    size_t first = start, last = end;
+    while (first < last && list[first] == ' ') {
+      ++first;
+    }
+    while (last > first && list[last - 1] == ' ') {
+      --last;
+    }
+    if (last > first &&
+        xe::utf8::equal_case(std::string_view(list).substr(first, last - first),
+                             patch_name)) {
+      return true;
+    }
+    start = end + 1;
+  }
+  return false;
+}
+}  // namespace
 
 namespace xe {
 namespace patcher {
@@ -25,7 +63,9 @@ void Patcher::ApplyPatchesForTitle(Memory* memory, const uint32_t title_id,
 
   for (const PatchFileEntry& patchFile : title_patches) {
     for (const PatchInfoEntry& patchEntry : patchFile.patch_info) {
-      if (!patchEntry.is_enabled) {
+      if (!patchEntry.is_enabled &&
+          (cvars::patches_enable.empty() ||
+           !IsPatchForceEnabled(patchEntry.patch_name))) {
         continue;
       }
       XELOGE("Patcher: Applying patch for: {}({:08X}) - {}",

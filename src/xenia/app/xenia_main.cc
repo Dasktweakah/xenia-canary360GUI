@@ -44,6 +44,7 @@
 #endif  // !XE_PLATFORM_ANDROID
 #if XE_PLATFORM_WIN32
 #include "xenia/apu/xaudio2/xaudio2_audio_system.h"
+#include "xenia/base/platform_win.h"
 #endif  // XE_PLATFORM_WIN32
 
 // Available graphics systems:
@@ -132,6 +133,14 @@ DEFINE_transient_bool(portable, true,
 DECLARE_bool(debug);
 
 DEFINE_bool(discord, true, "Enable Discord rich presence", "General");
+
+DEFINE_bool(
+    power_throttling, false,
+    "Basically360: let Windows slow Xenia down (EcoQoS, timer resolution) "
+    "while its window is not the one in front. Off, the default, every copy "
+    "runs at full speed, so copies side by side (split screen) keep the same "
+    "frame rate.",
+    "General");
 
 DECLARE_int32(window_size_x);
 DECLARE_int32(window_size_y);
@@ -501,6 +510,36 @@ bool EmulatorApp::OnInitialize() {
   XELOGI("Storage root: {}", storage_root);
 
   config::SetupConfig(storage_root);
+
+#if XE_PLATFORM_WIN32
+  // Basically360: no power throttling for this process unless it's wanted.
+  if (!cvars::power_throttling) {
+    // PROCESS_POWER_THROTTLING_STATE, set by SetProcessInformation with
+    // ProcessPowerThrottling (4), looked up at run time for older Windows.
+    struct PowerThrottlingState {
+      ULONG version;
+      ULONG control_mask;
+      ULONG state_mask;
+    };
+    using SetProcessInformationFunction = BOOL(WINAPI*)(
+        HANDLE process, int information_class, LPVOID info, DWORD info_size);
+    HMODULE kernel32 = GetModuleHandleW(L"kernel32.dll");
+    auto set_process_information =
+        kernel32 ? reinterpret_cast<SetProcessInformationFunction>(
+                       GetProcAddress(kernel32, "SetProcessInformation"))
+                 : nullptr;
+    if (set_process_information) {
+      // Execution speed (1) and timer resolution (4) under our control, both
+      // not throttled. Older Windows 10 knows only the execution speed.
+      PowerThrottlingState state = {1, 0x1 | 0x4, 0};
+      if (!set_process_information(GetCurrentProcess(), 4, &state,
+                                   sizeof(state))) {
+        state.control_mask = 0x1;
+        set_process_information(GetCurrentProcess(), 4, &state, sizeof(state));
+      }
+    }
+  }
+#endif  // XE_PLATFORM_WIN32
 
 #if XE_ARCH_AMD64 == 1
   amd64::InitFeatureFlags();

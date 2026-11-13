@@ -75,19 +75,22 @@ DEFINE_int32(
     "default: off, every controller works in this copy.",
     "HID");
 
+DEFINE_bool(
+    split_screen, false,
+    "Basically360, with controller_instance: live split screen on one "
+    "monitor, one copy of Xenia per player started together in full screen. "
+    "Copy 1 fills the screen; the other copies wait hidden (and paused after "
+    "split_screen_pause_after seconds) until a player joins by pressing a "
+    "button on a controller no copy has, which works while player 1's game "
+    "lets players join (split_screen_join_address). Then every window moves: "
+    "2 players get a top and a bottom strip, 3 players a top strip for player "
+    "1 and two bottom quarters, 4 players quarters. A copy shown as a strip "
+    "shows the part of the picture given by split_screen_strip_crop.",
+    "HID");
+
 namespace xe {
 namespace hid {
 namespace sdl {
-
-// The table every copy of Xenia with controller_instance set shares: which
-// process runs each player's copy, and the device each one has taken.
-struct SDLInputDriver::InstanceTable {
-  static constexpr uint32_t kMagic = 0x58434931;  // XCI1
-  static constexpr size_t kKeySize = 256;
-  uint32_t magic;
-  uint32_t pid[HID_SDL_USER_COUNT];
-  char key[HID_SDL_USER_COUNT][kKeySize];
-};
 
 namespace {
 
@@ -843,11 +846,11 @@ void SDLInputDriver::OpenInstanceTable() {
     return;
   }
   instance_mutex_ =
-      CreateMutexW(nullptr, FALSE, L"Local\\XeniaControllerInstancesLock");
+      CreateMutexW(nullptr, FALSE, XE_CONTROLLER_INSTANCE_LOCK_NAME);
   HANDLE mapping =
       CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0,
                          static_cast<DWORD>(sizeof(InstanceTable)),
-                         L"Local\\XeniaControllerInstances");
+                         XE_CONTROLLER_INSTANCE_TABLE_NAME);
   if (!instance_mutex_ || !mapping) {
     XELOGW("SDL controller_instance: could not open the shared table ({}).",
            GetLastError());
@@ -879,6 +882,8 @@ void SDLInputDriver::OpenInstanceTable() {
   }
   table->pid[me] = GetCurrentProcessId();
   table->key[me][0] = '\0';
+  table->joined[me] = 0;
+  table->join_requested[me] = 0;
 #endif  // XE_PLATFORM_WIN32
   XELOGI(
       "SDL controller_instance: this copy is player {}; it takes the next "
@@ -895,6 +900,8 @@ void SDLInputDriver::CloseInstanceTable() {
       if (instance_table_->pid[me] == GetCurrentProcessId()) {
         instance_table_->pid[me] = 0;
         instance_table_->key[me][0] = '\0';
+        instance_table_->joined[me] = 0;
+        instance_table_->join_requested[me] = 0;
       }
     }
     UnmapViewOfFile(instance_table_);
@@ -925,11 +932,18 @@ bool SDLInputDriver::ClaimForInstance(const std::string& device_key,
     auto& table = *instance_table_;
     const size_t me = InstanceIndex();
     std::optional<size_t> waiting;
+    // split_screen: a player other than player 1 joins only while player 1's
+    // game lets them (in a match).
+    if (cvars::split_screen && me != 0 && !table.joined[me] &&
+        !table.join_open) {
+      return false;
+    }
     for (size_t i = 0; i < HID_SDL_USER_COUNT; i++) {
       if (i != me && !ProcessRunning(table.pid[i])) {
         // That copy has closed: its controller is free.
         table.pid[i] = 0;
         table.key[i][0] = '\0';
+        table.joined[i] = 0;
         continue;
       }
       if (i != me && device_key == table.key[i]) {
@@ -943,6 +957,7 @@ bool SDLInputDriver::ClaimForInstance(const std::string& device_key,
       return false;  // a lower-numbered copy takes this one
     }
     table.pid[me] = GetCurrentProcessId();
+    table.joined[me] = 1;
     std::strncpy(table.key[me], device_key.c_str(),
                  InstanceTable::kKeySize - 1);
     table.key[me][InstanceTable::kKeySize - 1] = '\0';

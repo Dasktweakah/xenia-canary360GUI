@@ -211,6 +211,7 @@ std::unique_ptr<EmulatorWindow> EmulatorWindow::Create(
 }
 
 EmulatorWindow::~EmulatorWindow() {
+  split_screen_.reset();
   // Notify the ImGui drawer that the immediate drawer is being destroyed.
   ShutdownGraphicsSystemPresenterPainting();
 }
@@ -942,9 +943,21 @@ bool EmulatorWindow::Initialize() {
 
   UpdateTitle();
 
+  // Basically360: live split screen (a copy waiting for its player opens
+  // hidden).
+  if (SplitScreen::Enabled()) {
+    split_screen_ =
+        std::make_unique<SplitScreen>(emulator_, app_context_, window_.get());
+    split_screen_->ApplyInitialPlacement();
+  }
+
   if (!window_->Open()) {
     XELOGE("Failed to open the platform window");
     return false;
+  }
+
+  if (split_screen_) {
+    split_screen_->Start();
   }
 
   Profiler::SetUserIO(kZOrderProfiler, window_.get(), nullptr, nullptr);
@@ -1041,6 +1054,14 @@ void EmulatorWindow::ApplyDisplayConfigForCvars() {
 
 void EmulatorWindow::OnKeyDown(ui::KeyEvent& e) {
   if (!emulator_initialized_) {
+    return;
+  }
+
+  // Basically360: in live split screen, F8 lets the next player join without a
+  // controller (for testing with the keyboard).
+  if (split_screen_ && e.virtual_key() == ui::VirtualKey::kF8) {
+    split_screen_->RequestTestJoin();
+    e.set_handled(true);
     return;
   }
 

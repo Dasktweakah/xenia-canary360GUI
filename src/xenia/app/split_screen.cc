@@ -1,0 +1,523 @@
+/**
+ ******************************************************************************
+ * Xenia : Xbox 360 Emulator Research Project                                 *
+ ******************************************************************************
+ * Copyright 2026 Ben Vanik. All rights reserved.                             *
+ * Released under the BSD license - see LICENSE in the root for more details. *
+ ******************************************************************************
+ */
+
+#include "xenia/app/split_screen.h"
+
+#include <cctype>
+#include <cstdlib>
+#include <cstring>
+
+#include "xenia/base/cvar.h"
+#include "xenia/base/logging.h"
+#include "xenia/base/memory.h"
+#include "xenia/base/platform.h"
+#include "xenia/emulator.h"
+#include "xenia/hid/controller_instances.h"
+#include "xenia/hid/input_system.h"
+#include "xenia/hid/sdl/sdl_hid.h"
+#include "xenia/memory.h"
+#include "xenia/ui/presenter.h"
+#include "xenia/ui/window.h"
+#include "xenia/ui/windowed_app_context.h"
+
+#if XE_PLATFORM_WIN32
+#include "xenia/base/platform_win.h"
+#include "xenia/ui/window_win.h"
+#endif
+
+DECLARE_bool(split_screen);
+DECLARE_int32(controller_instance);
+
+DEFINE_string(
+    split_screen_strip_crop, "0,0,100,48.889",
+    "Basically360, split_screen: the part of the picture a copy shown as a "
+    "wide strip (2 players, or player 1 of 3) shows, as x,y,width,height in "
+    "percent of the picture. The default fits Garden Warfare with its split "
+    "screen patch (the view drawn in the top 1280x352).",
+    "Display");
+DEFINE_string(
+    split_screen_strip_address, "",
+    "Basically360, split_screen: guest address (hex) of a 32-bit flag Xenia "
+    "sets to 1 while this copy is shown as a wide strip and 0 otherwise, for "
+    "a game patch that draws the view in the strip's shape (Garden Warfare: "
+    "0x89958400). Empty: none.",
+    "Display");
+DEFINE_string(
+    split_screen_join_address, "",
+    "Basically360, split_screen: guest address (hex) of a 32-bit flag player "
+    "1's game (patched) sets while other players may join (Garden Warfare: "
+    "0x89958408, while a match is on). Empty: players may join any time.",
+    "Display");
+DEFINE_int32(
+    split_screen_pause_after, 75,
+    "Basically360, split_screen: seconds after starting that a copy still "
+    "waiting for its player is paused (no CPU or GPU use until the player "
+    "joins). 0: never paused.",
+    "Display");
+DEFINE_string(
+    split_screen_join_script, "",
+    "Basically360, split_screen: buttons Xenia presses for a player who has "
+    "just joined, to take them into player 1's match: button names (a b x y "
+    "start back up down left right lb rb, or several joined with +) pressed "
+    "in turn and numbers of seconds to wait, separated by commas, for example "
+    "\"3,start,20,a,4,a\". Empty: none.",
+    "Display");
+
+namespace xe {
+namespace app {
+
+namespace {
+
+constexpr size_t kCount = hid::ControllerInstanceTable::kCount;
+
+uint32_t ParseAddress(const std::string& text) {
+  if (text.empty()) {
+    return 0;
+  }
+  return uint32_t(std::strtoul(text.c_str(), nullptr, 16));
+}
+
+#if XE_PLATFORM_WIN32
+bool ProcessRunning(uint32_t pid) {
+  if (!pid) {
+    return false;
+  }
+  if (pid == GetCurrentProcessId()) {
+    return true;
+  }
+  HANDLE process = OpenProcess(SYNCHRONIZE, FALSE, pid);
+  if (!process) {
+    return GetLastError() == ERROR_ACCESS_DENIED;
+  }
+  const bool running = WaitForSingleObject(process, 0) == WAIT_TIMEOUT;
+  CloseHandle(process);
+  return running;
+}
+
+class TableLock {
+ public:
+  explicit TableLock(void* mutex) : mutex_(mutex) {
+    if (mutex_) {
+      const DWORD wait = WaitForSingleObject(mutex_, 200);
+      locked_ = wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED;
+    }
+  }
+  ~TableLock() {
+    if (locked_) {
+      ReleaseMutex(mutex_);
+    }
+  }
+  bool locked() const { return locked_; }
+
+ private:
+  void* mutex_;
+  bool locked_ = false;
+};
+#endif  // XE_PLATFORM_WIN32
+
+}  // namespace
+
+bool SplitScreen::Placement::operator==(const Placement& other) const {
+  return visible == other.visible && strip == other.strip &&
+         !std::memcmp(rect, other.rect, sizeof(rect));
+}
+
+bool SplitScreen::Enabled() {
+#if XE_PLATFORM_WIN32
+  return cvars::split_screen && cvars::controller_instance >= 1 &&
+         cvars::controller_instance <= int32_t(kCount);
+#else
+  return false;
+#endif
+}
+
+SplitScreen::SplitScreen(Emulator* emulator,
+                         ui::WindowedAppContext& app_context,
+                         ui::Window* window)
+    : emulator_(emulator),
+      app_context_(app_context),
+      window_(window),
+      me_(size_t(cvars::controller_instance - 1)),
+      alive_(std::make_shared<std::atomic<bool>>(true)) {
+#if XE_PLATFORM_WIN32
+  table_mutex_ = CreateMutexW(nullptr, FALSE, XE_CONTROLLER_INSTANCE_LOCK_NAME);
+  HANDLE mapping =
+      CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0,
+                         DWORD(sizeof(hid::ControllerInstanceTable)),
+                         XE_CONTROLLER_INSTANCE_TABLE_NAME);
+  if (mapping) {
+    table_ = MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0,
+                           sizeof(hid::ControllerInstanceTable));
+    if (table_) {
+      table_mapping_ = mapping;
+      TableLock lock(table_mutex_);
+      auto& table = *static_cast<hid::ControllerInstanceTable*>(table_);
+      if (table.magic != hid::ControllerInstanceTable::kMagic) {
+        std::memset(&table, 0, sizeof(table));
+        table.magic = hid::ControllerInstanceTable::kMagic;
+      }
+    } else {
+      CloseHandle(mapping);
+    }
+  }
+  if (!table_) {
+    XELOGE("split_screen: could not open the table shared by the copies ({})",
+           GetLastError());
+  }
+#endif  // XE_PLATFORM_WIN32
+  script_ = ParseScript(cvars::split_screen_join_script);
+}
+
+SplitScreen::~SplitScreen() {
+  alive_->store(false);
+  if (thread_.joinable()) {
+    {
+      std::lock_guard<std::mutex> lock(thread_mutex_);
+      thread_stop_ = true;
+    }
+    thread_cv_.notify_all();
+    thread_.join();
+  }
+#if XE_PLATFORM_WIN32
+  if (table_) {
+    UnmapViewOfFile(table_);
+    table_ = nullptr;
+  }
+  if (table_mapping_) {
+    CloseHandle(table_mapping_);
+    table_mapping_ = nullptr;
+  }
+  if (table_mutex_) {
+    CloseHandle(table_mutex_);
+    table_mutex_ = nullptr;
+  }
+#endif  // XE_PLATFORM_WIN32
+}
+
+void SplitScreen::ApplyInitialPlacement() {
+  Placement placement;
+  placement.visible = me_ == 0;
+  placement.rect[2] = 100.0f;
+  placement.rect[3] = 100.0f;
+  ApplyPlacement(placement);
+}
+
+void SplitScreen::Start() {
+  start_time_ = std::chrono::steady_clock::now();
+  std::shared_ptr<std::atomic<bool>> alive = alive_;
+  thread_ = std::thread([this, alive]() {
+    std::unique_lock<std::mutex> lock(thread_mutex_);
+    while (!thread_stop_) {
+      thread_cv_.wait_for(lock, std::chrono::milliseconds(100));
+      if (thread_stop_) {
+        break;
+      }
+      app_context_.CallInUIThread([this, alive]() {
+        if (alive->load()) {
+          Tick();
+        }
+      });
+    }
+  });
+  XELOGI("split_screen: this copy is player {}'s", me_ + 1);
+}
+
+void SplitScreen::RequestTestJoin() {
+#if XE_PLATFORM_WIN32
+  if (!table_) {
+    return;
+  }
+  TableLock lock(table_mutex_);
+  if (!lock.locked()) {
+    return;
+  }
+  auto& table = *static_cast<hid::ControllerInstanceTable*>(table_);
+  for (size_t i = 1; i < kCount; ++i) {
+    if (ProcessRunning(table.pid[i]) && !table.joined[i]) {
+      table.join_requested[i] = 1;
+      XELOGI("split_screen: test key, player {} joins", i + 1);
+      return;
+    }
+  }
+#endif  // XE_PLATFORM_WIN32
+}
+
+void SplitScreen::Tick() {
+#if XE_PLATFORM_WIN32
+  if (!table_) {
+    return;
+  }
+  uint32_t pid[kCount];
+  uint32_t joined[kCount];
+  {
+    TableLock lock(table_mutex_);
+    if (!lock.locked()) {
+      return;
+    }
+    auto& table = *static_cast<hid::ControllerInstanceTable*>(table_);
+    if (me_ == 0) {
+      table.join_open = ParseAddress(cvars::split_screen_join_address)
+                            ? ReadGuestJoinOpen()
+                            : 1;
+    }
+    if (table.join_requested[me_]) {
+      if (table.joined[me_]) {
+        table.join_requested[me_] = 0;
+      } else if (table.join_open) {
+        table.join_requested[me_] = 0;
+        table.joined[me_] = 1;
+      }
+    }
+    std::memcpy(pid, table.pid, sizeof(pid));
+    std::memcpy(joined, table.joined, sizeof(joined));
+  }
+
+  // The copies on screen, in player order: player 1's while it runs, the
+  // others' once their player has joined.
+  size_t active[kCount];
+  size_t active_count = 0;
+  size_t my_position = SIZE_MAX;
+  for (size_t i = 0; i < kCount; ++i) {
+    const bool running = i == me_ || ProcessRunning(pid[i]);
+    if (!running || (i != 0 && !joined[i])) {
+      continue;
+    }
+    if (i == me_) {
+      my_position = active_count;
+    }
+    active[active_count++] = i;
+  }
+
+  Placement placement;
+  if (my_position != SIZE_MAX) {
+    placement.visible = true;
+    float* r = placement.rect;
+    switch (active_count) {
+      case 1:
+        r[2] = 100.0f;
+        r[3] = 100.0f;
+        break;
+      case 2:
+        placement.strip = true;
+        r[1] = my_position ? 50.0f : 0.0f;
+        r[2] = 100.0f;
+        r[3] = 50.0f;
+        break;
+      case 3:
+        if (!my_position) {
+          placement.strip = true;
+          r[2] = 100.0f;
+        } else {
+          r[0] = my_position == 1 ? 0.0f : 50.0f;
+          r[1] = 50.0f;
+          r[2] = 50.0f;
+        }
+        r[3] = 50.0f;
+        break;
+      default:
+        r[0] = (my_position & 1) ? 50.0f : 0.0f;
+        r[1] = (my_position & 2) ? 50.0f : 0.0f;
+        r[2] = 50.0f;
+        r[3] = 50.0f;
+        break;
+    }
+  }
+  if (!placement_applied_ || !(placement == placement_)) {
+    if (placement.visible && !placement_.visible && placement_applied_ &&
+        me_ != 0) {
+      // This player has just joined.
+      XELOGI("split_screen: player {} joined ({} on screen)", me_ + 1,
+             active_count);
+      script_step_ = 0;
+      script_step_time_ = std::chrono::steady_clock::now();
+      script_button_down_ = false;
+      joined_seen_ = true;
+    }
+    ApplyPlacement(placement);
+  }
+  WriteGuestStrip(placement.visible && placement.strip);
+
+  // A copy waiting for its player: pause it after a while, and keep reading
+  // the controllers (a paused game doesn't ask for them) so the player can
+  // join.
+  if (!placement.visible) {
+    xe::hid::sdl::PumpEvents();
+    const auto waited = std::chrono::steady_clock::now() - start_time_;
+    if (!paused_by_us_ && cvars::split_screen_pause_after > 0 &&
+        waited >= std::chrono::seconds(cvars::split_screen_pause_after) &&
+        emulator_->is_title_open() && !emulator_->is_paused()) {
+      XELOGI("split_screen: pausing until player {} joins", me_ + 1);
+      emulator_->Pause();
+      paused_by_us_ = true;
+    }
+  } else {
+    if (paused_by_us_) {
+      emulator_->Resume();
+      paused_by_us_ = false;
+    }
+    if (joined_seen_) {
+      RunScript();
+    }
+  }
+#endif  // XE_PLATFORM_WIN32
+}
+
+void SplitScreen::ApplyPlacement(const Placement& placement) {
+  placement_ = placement;
+  placement_applied_ = true;
+#if XE_PLATFORM_WIN32
+  static_cast<ui::Win32Window*>(window_)->SetSplitScreenPlacement(
+      placement.visible, placement.rect);
+#endif  // XE_PLATFORM_WIN32
+  float crop[4] = {};
+  if (placement.strip) {
+    const char* text = cvars::split_screen_strip_crop.c_str();
+    for (size_t i = 0; i < 4; ++i) {
+      char* end = nullptr;
+      crop[i] = std::strtof(text, &end);
+      if (end == text) {
+        crop[2] = 0.0f;
+        break;
+      }
+      while (*end == ' ' || *end == '%' || *end == ',') {
+        ++end;
+      }
+      text = end;
+    }
+  }
+  ui::Presenter::SetCropOverride(crop[0], crop[1], crop[2], crop[3]);
+}
+
+void SplitScreen::WriteGuestStrip(bool strip) {
+  const uint32_t address = ParseAddress(cvars::split_screen_strip_address);
+  Memory* memory = emulator_->memory();
+  if (!address || !memory || !emulator_->is_title_open()) {
+    return;
+  }
+  BaseHeap* heap = memory->LookupHeap(address);
+  uint32_t protect = 0;
+  if (!heap || !heap->QueryProtect(address, &protect) ||
+      !(protect & kMemoryProtectRead)) {
+    return;
+  }
+  uint8_t* host = memory->TranslateVirtual<uint8_t*>(address);
+  const uint32_t value = strip ? 1 : 0;
+  if (xe::load_and_swap<uint32_t>(host) == value) {
+    return;
+  }
+  heap->Protect(address, 4, kMemoryProtectRead | kMemoryProtectWrite);
+  xe::store_and_swap<uint32_t>(host, value);
+  heap->Protect(address, 4, protect);
+}
+
+bool SplitScreen::ReadGuestJoinOpen() {
+  const uint32_t address = ParseAddress(cvars::split_screen_join_address);
+  Memory* memory = emulator_->memory();
+  if (!address || !memory || !emulator_->is_title_open()) {
+    return false;
+  }
+  BaseHeap* heap = memory->LookupHeap(address);
+  uint32_t protect = 0;
+  if (!heap || !heap->QueryProtect(address, &protect) ||
+      !(protect & kMemoryProtectRead)) {
+    return false;
+  }
+  return xe::load_and_swap<uint32_t>(
+             memory->TranslateVirtual<const uint8_t*>(address)) != 0;
+}
+
+void SplitScreen::RunScript() {
+  hid::InputSystem* input = emulator_->input_system();
+  if (!input || script_step_ >= script_.size()) {
+    return;
+  }
+  const auto now = std::chrono::steady_clock::now();
+  const float elapsed =
+      std::chrono::duration<float>(now - script_step_time_).count();
+  const ScriptStep& step = script_[script_step_];
+  if (!step.buttons) {
+    if (elapsed >= step.wait_seconds) {
+      ++script_step_;
+      script_step_time_ = now;
+    }
+    return;
+  }
+  // A button: held for 0.2 seconds, then 0.4 seconds before the next step.
+  if (!script_button_down_) {
+    input->SetScriptedButtons(step.buttons);
+    script_button_down_ = true;
+    script_step_time_ = now;
+  } else if (elapsed >= 0.2f && elapsed < 0.6f) {
+    input->SetScriptedButtons(0);
+  } else if (elapsed >= 0.6f) {
+    input->SetScriptedButtons(0);
+    script_button_down_ = false;
+    ++script_step_;
+    script_step_time_ = now;
+  }
+}
+
+std::vector<SplitScreen::ScriptStep> SplitScreen::ParseScript(
+    const std::string& text) {
+  static const std::pair<const char*, uint16_t> kButtons[] = {
+      {"a", 0x1000},     {"b", 0x2000},     {"x", 0x4000},  {"y", 0x8000},
+      {"start", 0x0010}, {"back", 0x0020},  {"up", 0x0001}, {"down", 0x0002},
+      {"left", 0x0004},  {"right", 0x0008}, {"lb", 0x0100}, {"rb", 0x0200},
+  };
+  std::vector<ScriptStep> steps;
+  size_t start = 0;
+  while (start < text.size()) {
+    size_t end = text.find(',', start);
+    if (end == std::string::npos) {
+      end = text.size();
+    }
+    std::string item;
+    for (size_t i = start; i < end; ++i) {
+      if (!std::isspace(uint8_t(text[i]))) {
+        item.push_back(char(std::tolower(uint8_t(text[i]))));
+      }
+    }
+    start = end + 1;
+    if (item.empty()) {
+      continue;
+    }
+    ScriptStep step;
+    if (std::isdigit(uint8_t(item[0])) || item[0] == '.') {
+      step.wait_seconds = std::strtof(item.c_str(), nullptr);
+    } else {
+      size_t name_start = 0;
+      while (name_start <= item.size()) {
+        size_t name_end = item.find('+', name_start);
+        if (name_end == std::string::npos) {
+          name_end = item.size();
+        }
+        const std::string name = item.substr(name_start, name_end - name_start);
+        bool known = false;
+        for (const auto& button : kButtons) {
+          if (name == button.first) {
+            step.buttons |= button.second;
+            known = true;
+          }
+        }
+        if (!known) {
+          XELOGW("split_screen_join_script: unknown button \"{}\"", name);
+        }
+        name_start = name_end + 1;
+      }
+      if (!step.buttons) {
+        continue;
+      }
+    }
+    steps.push_back(step);
+  }
+  return steps;
+}
+
+}  // namespace app
+}  // namespace xe

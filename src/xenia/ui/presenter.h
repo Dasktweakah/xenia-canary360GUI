@@ -163,6 +163,10 @@ struct RawImage {
 // only to the UI thread.
 class Presenter {
  public:
+  // Basically360: the part of the guest picture to show filling the window, as
+  // x, y, width, height in percent of the picture, set at run time (live split
+  // screen); takes the place of present_crop. A width or height of 0: none.
+  static void SetCropOverride(float x, float y, float width, float height);
   // May be actually called on the UI thread even if statically_from_ui_thread
   // is false, such as when the guest output is refreshed by the UI thread.
   using HostGpuLossCallback =

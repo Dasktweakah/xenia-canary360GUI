@@ -89,6 +89,10 @@ uint32_t ParseAddress(const std::string& text) {
 // protection the heap records isn't checked: a patch's data in a title's image
 // (where the game itself reads and writes the flag) may be recorded as no
 // access while it's in fact read-write.
+// The host memory behind a 32-bit guest flag, if it's there and writable. The
+// guest heap's page table isn't asked: a title image's pages may be recorded
+// there as free or no access while the game reads and writes them; the host
+// memory behind them is what counts.
 uint8_t* GuestFlag(Memory* memory, uint32_t address,
                    std::string* why = nullptr) {
   if (!memory || !address) {
@@ -97,19 +101,28 @@ uint8_t* GuestFlag(Memory* memory, uint32_t address,
     }
     return nullptr;
   }
-  BaseHeap* heap = memory->LookupHeap(address);
-  HeapAllocationInfo info = {};
-  const bool queried =
-      heap && heap->QueryRegionInfo(address & ~uint32_t(3), &info);
-  if (why) {
-    *why = fmt::format("heap {} queried {} state {:X} protect {:X} base {:08X}",
-                       heap ? "yes" : "no", queried, info.state, info.protect,
-                       info.allocation_base);
-  }
-  if (!queried || !(info.state & kMemoryAllocationCommit)) {
+  uint8_t* host = memory->TranslateVirtual<uint8_t*>(address & ~uint32_t(3));
+#if XE_PLATFORM_WIN32
+  MEMORY_BASIC_INFORMATION info = {};
+  if (!VirtualQuery(host, &info, sizeof(info)) || info.State != MEM_COMMIT ||
+      !(info.Protect & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE)) ||
+      (info.Protect & PAGE_GUARD)) {
+    if (why) {
+      *why = fmt::format("host memory state {:X} protect {:X}", info.State,
+                         info.Protect);
+    }
     return nullptr;
   }
-  return memory->TranslateVirtual<uint8_t*>(address);
+  if (why) {
+    *why = "ok";
+  }
+  return host;
+#else
+  if (why) {
+    *why = "not on this platform";
+  }
+  return nullptr;
+#endif
 }
 
 #if XE_PLATFORM_WIN32

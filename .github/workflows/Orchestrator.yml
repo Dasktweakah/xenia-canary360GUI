@@ -47,7 +47,8 @@ jobs:
   build-linux:
     name: Linux (x86-64)
     needs: [lint, commit-message]
-    if: ${{ !failure() && !cancelled() }}
+    # Not needed for this fork's own pushes (Windows only), saves ~13 minutes.
+    if: ${{ !failure() && !cancelled() && !(github.repository == 'Dasktweakah/xenia-canary360GUI' && github.event_name == 'push') }}
     uses: ./.github/workflows/Linux_x86.yml
     with:
       runs-on: ${{ needs.lint.outputs.runs-on }}
@@ -86,7 +87,7 @@ jobs:
       (github.repository == 'xenia-canary/xenia-canary' || github.repository == 'Dasktweakah/xenia-canary360GUI') &&
       github.event_name == 'push' &&
       github.ref == 'refs/heads/canary_experimental' &&
-      (needs.build-windows.result == 'success' && needs.build-linux.result == 'success')
+      (needs.build-windows.result == 'success' && (needs.build-linux.result == 'success' || needs.build-linux.result == 'skipped'))
     uses: ./.github/workflows/Create_release.yml
     permissions:
       contents: write

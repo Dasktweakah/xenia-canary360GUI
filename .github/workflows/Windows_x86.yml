@@ -73,10 +73,27 @@ jobs:
           $SUBMODULES=(Select-String -CaseSensitive '(?<=path = )(?!third_party\/xbyak_aarch64).+' .gitmodules).Matches.Value
           git submodule update --init --depth=1 -j $env:NUMBER_OF_PROCESSORS $SUBMODULES
 
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: '3.13'
+      - name: Find Python
+        # GitHub's machines have it on PATH. On the self-hosted runner use an all-users
+        # install if there is one, otherwise a private copy (NuGet package, no installer).
+        run: |-
+          if (Get-Command python -ErrorAction SilentlyContinue) {
+            python --version; exit 0
+          }
+          $found = Get-ChildItem "$env:ProgramFiles\Python3*\python.exe" -ErrorAction SilentlyContinue |
+            Sort-Object FullName | Select-Object -Last 1
+          if (-not $found) {
+            $dir = Join-Path $env:RUNNER_TOOL_CACHE "python-nuget-3.13.9"
+            if (-not (Test-Path "$dir\tools\python.exe")) {
+              New-Item -ItemType Directory -Force -Path $dir | Out-Null
+              Invoke-WebRequest -Uri "https://www.nuget.org/api/v2/package/python/3.13.9" -OutFile "$dir\python.zip"
+              Expand-Archive -LiteralPath "$dir\python.zip" -DestinationPath $dir -Force
+            }
+            $found = Get-Item "$dir\tools\python.exe"
+          }
+          echo "Using $($found.FullName)"
+          & $found.FullName --version
+          echo $found.DirectoryName >> $env:GITHUB_PATH
 
       - name: Build Xenia
         run: python xenia-build.py build --config=Release --target=xenia-app

@@ -60,7 +60,7 @@ class SplitScreen {
 
   void Tick();
   void ApplyPlacement(const Placement& placement);
-  void WriteGuestStrip(bool strip);
+  void WriteGuestStrip(uint32_t rows);
   bool ReadGuestJoinOpen();
   void RunScript();
   static std::vector<ScriptStep> ParseScript(const std::string& text);
@@ -84,6 +84,7 @@ class SplitScreen {
   Placement placement_;
   std::chrono::steady_clock::time_point start_time_;
   bool paused_by_us_ = false;
+  uint32_t strip_rows_ = 0;
   unsigned long normal_priority_ = 0;
   bool joined_seen_ = false;
   bool join_open_logged_ = false;

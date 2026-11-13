@@ -9,6 +9,7 @@
 
 #include "xenia/app/split_screen.h"
 
+#include <algorithm>
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
@@ -43,10 +44,12 @@ DEFINE_string(
     "Display");
 DEFINE_string(
     split_screen_strip_address, "",
-    "Basically360, split_screen: guest address (hex) of a 32-bit flag Xenia "
-    "sets to 1 while this copy is shown as a wide strip and 0 otherwise, for "
-    "a game patch that draws the view in the strip's shape (Garden Warfare: "
-    "0x89958400). Empty: none.",
+    "Basically360, split_screen: guest address (hex) where Xenia writes, while "
+    "this copy is shown as a wide strip, how many rows of the 1280x720 picture "
+    "the game should draw its view in (the strip's shape; 0 otherwise), with "
+    "float aspect ratio and field of view multipliers at +0x10 and +0x14, for "
+    "a game patch (Garden Warfare: 0x89958400). The copy then shows those "
+    "rows. Empty: none (split_screen_strip_crop is shown).",
     "Display");
 DEFINE_string(
     split_screen_join_address, "",
@@ -396,7 +399,26 @@ void SplitScreen::Tick() {
     }
     ApplyPlacement(placement);
   }
-  WriteGuestStrip(placement.visible && placement.strip);
+  // A strip: the game draws its view in the top rows of its 1280x720 picture,
+  // as many as give the window's shape (a multiple of 16), shown filling it.
+  uint32_t rows = 0;
+  if (placement.visible && placement.strip &&
+      ParseAddress(cvars::split_screen_strip_address)) {
+    const uint32_t width = window_->GetActualPhysicalWidth();
+    const uint32_t height = window_->GetActualPhysicalHeight();
+    if (width && height) {
+      rows = uint32_t(1280.0 * double(height) / double(width)) & ~uint32_t(15);
+      rows = std::min(std::max(rows, uint32_t(176)), uint32_t(704));
+    }
+  }
+  if (rows != strip_rows_) {
+    strip_rows_ = rows;
+    if (rows) {
+      ui::Presenter::SetCropOverride(0.0f, 0.0f, 100.0f,
+                                     float(rows) * 100.0f / 720.0f);
+    }
+  }
+  WriteGuestStrip(rows);
 
   // Diagnostics every 10 seconds: the flags as this copy sees them.
   const auto now = std::chrono::steady_clock::now();
@@ -456,7 +478,9 @@ void SplitScreen::ApplyPlacement(const Placement& placement) {
       placement.visible, placement.rect);
 #endif  // XE_PLATFORM_WIN32
   float crop[4] = {};
-  if (placement.strip) {
+  strip_rows_ = 0;
+  // With a strip address the crop follows the rows the game draws (Tick).
+  if (placement.strip && !ParseAddress(cvars::split_screen_strip_address)) {
     const char* text = cvars::split_screen_strip_crop.c_str();
     for (size_t i = 0; i < 4; ++i) {
       char* end = nullptr;
@@ -474,19 +498,22 @@ void SplitScreen::ApplyPlacement(const Placement& placement) {
   ui::Presenter::SetCropOverride(crop[0], crop[1], crop[2], crop[3]);
 }
 
-void SplitScreen::WriteGuestStrip(bool strip) {
+void SplitScreen::WriteGuestStrip(uint32_t rows) {
   if (!emulator_->is_title_open()) {
     return;
   }
+  // STRIP (rows, 0: normal) at the address; the aspect ratio and field of
+  // view multipliers for those rows at +0x10 and +0x14 (written first).
   uint8_t* host = GuestFlag(emulator_->memory(),
                             ParseAddress(cvars::split_screen_strip_address));
-  if (!host) {
+  if (!host || xe::load_and_swap<uint32_t>(host) == rows) {
     return;
   }
-  const uint32_t value = strip ? 1 : 0;
-  if (xe::load_and_swap<uint32_t>(host) != value) {
-    xe::store_and_swap<uint32_t>(host, value);
+  if (rows) {
+    xe::store_and_swap<float>(host + 0x10, 720.0f / float(rows));
+    xe::store_and_swap<float>(host + 0x14, float(rows) / 720.0f);
   }
+  xe::store_and_swap<uint32_t>(host, rows);
 }
 
 bool SplitScreen::ReadGuestJoinOpen() {

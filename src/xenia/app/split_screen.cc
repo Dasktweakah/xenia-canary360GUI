@@ -51,8 +51,10 @@ DEFINE_string(
 DEFINE_string(
     split_screen_join_address, "",
     "Basically360, split_screen: guest address (hex) of a 32-bit flag player "
-    "1's game (patched) sets while other players may join (Garden Warfare: "
-    "0x89958408, while a match is on). Empty: players may join any time.",
+    "1's game (patched) sets while other players may join, or \"server\": "
+    "the program serving the game sets it in the table the copies share "
+    "(Garden Warfare Server: while player 1's match is on). Empty: players "
+    "may join any time.",
     "Display");
 DEFINE_int32(
     split_screen_pause_after, 75,
@@ -87,14 +89,24 @@ uint32_t ParseAddress(const std::string& text) {
 // protection the heap records isn't checked: a patch's data in a title's image
 // (where the game itself reads and writes the flag) may be recorded as no
 // access while it's in fact read-write.
-uint8_t* GuestFlag(Memory* memory, uint32_t address) {
+uint8_t* GuestFlag(Memory* memory, uint32_t address,
+                   std::string* why = nullptr) {
   if (!memory || !address) {
+    if (why) {
+      *why = "no memory or address";
+    }
     return nullptr;
   }
   BaseHeap* heap = memory->LookupHeap(address);
-  HeapAllocationInfo info;
-  if (!heap || !heap->QueryRegionInfo(address & ~uint32_t(3), &info) ||
-      !(info.state & kMemoryAllocationCommit)) {
+  HeapAllocationInfo info = {};
+  const bool queried =
+      heap && heap->QueryRegionInfo(address & ~uint32_t(3), &info);
+  if (why) {
+    *why = fmt::format("heap {} queried {} state {:X} protect {:X} base {:08X}",
+                       heap ? "yes" : "no", queried, info.state, info.protect,
+                       info.allocation_base);
+  }
+  if (!queried || !(info.state & kMemoryAllocationCommit)) {
     return nullptr;
   }
   return memory->TranslateVirtual<uint8_t*>(address);
@@ -278,7 +290,9 @@ void SplitScreen::Tick() {
       return;
     }
     auto& table = *static_cast<hid::ControllerInstanceTable*>(table_);
-    if (me_ == 0) {
+    // "server": the Garden Warfare Server sets join_open (in the table) while
+    // a match is on.
+    if (me_ == 0 && cvars::split_screen_join_address != "server") {
       const uint32_t join_open = ParseAddress(cvars::split_screen_join_address)
                                      ? ReadGuestJoinOpen()
                                      : 1;
@@ -370,6 +384,27 @@ void SplitScreen::Tick() {
     ApplyPlacement(placement);
   }
   WriteGuestStrip(placement.visible && placement.strip);
+
+  // Diagnostics every 10 seconds: the flags as this copy sees them.
+  const auto now = std::chrono::steady_clock::now();
+  if (now - last_diagnostic_ >= std::chrono::seconds(10)) {
+    last_diagnostic_ = now;
+    std::string why_strip, why_join;
+    const uint8_t* strip_host =
+        GuestFlag(emulator_->memory(),
+                  ParseAddress(cvars::split_screen_strip_address), &why_strip);
+    const uint8_t* join_host =
+        GuestFlag(emulator_->memory(),
+                  ParseAddress(cvars::split_screen_join_address), &why_join);
+    XELOGI(
+        "split_screen: title open {}, strip {} ({}), join flag {} ({}), "
+        "players on screen {}",
+        emulator_->is_title_open(),
+        strip_host ? int64_t(xe::load_and_swap<uint32_t>(strip_host)) : -1,
+        why_strip,
+        join_host ? int64_t(xe::load_and_swap<uint32_t>(join_host)) : -1,
+        why_join, active_count);
+  }
 
   // A copy waiting for its player: after a while, slow it to 2 frames a
   // second at idle priority. (Not suspended: suspending the game's threads

@@ -89,6 +89,7 @@ class SplitScreen {
   bool join_open_logged_ = false;
   bool join_wait_logged_ = false;
   bool join_read_failure_logged_ = false;
+  std::chrono::steady_clock::time_point last_diagnostic_;
 
   std::vector<ScriptStep> script_;
   size_t script_step_ = 0;

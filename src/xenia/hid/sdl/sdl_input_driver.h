@@ -12,6 +12,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -98,6 +99,8 @@ class SDLInputDriver final : public InputDriver {
   using InstanceTable = ControllerInstanceTable;
   static bool InstanceMode();
   void OpenInstanceTable();
+  void OfferJoin(const std::string& device_key);
+  void TakeAssignedController();
   void CloseInstanceTable();
   // Takes the device for this copy if the table allows: nobody else holds it,
   // and (unless it is this copy's own controller coming back) this is the
@@ -132,6 +135,7 @@ class SDLInputDriver final : public InputDriver {
   // had last (to take back when it reconnects), and the shared table.
   std::optional<size_t> instance_port_;
   std::string instance_last_key_;
+  std::chrono::steady_clock::time_point instance_assigned_check_;
   InstanceTable* instance_table_ = nullptr;
   void* instance_mapping_ = nullptr;
   void* instance_mutex_ = nullptr;

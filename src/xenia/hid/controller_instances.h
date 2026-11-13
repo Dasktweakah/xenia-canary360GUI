@@ -19,7 +19,7 @@ namespace hid {
 // Basically360: the table every copy of Xenia run with controller_instance
 // (one copy per player) shares, in named shared memory (Windows).
 struct ControllerInstanceTable {
-  static constexpr uint32_t kMagic = 0x58434932;  // XCI2
+  static constexpr uint32_t kMagic = 0x58434933;  // XCI3
   static constexpr size_t kCount = 4;
   static constexpr size_t kKeySize = 256;
   uint32_t magic;
@@ -30,14 +30,17 @@ struct ControllerInstanceTable {
   uint32_t joined[kCount];
   // split_screen: nonzero while player 1's game lets other players join.
   uint32_t join_open;
-  // A join asked for without a controller (split_screen test key), per copy.
+  // A join asked for, per copy: by the split_screen test key (no controller),
+  // or by a running copy that saw a button pressed on a controller nobody has
+  // (assigned_key: the copy takes that controller once it runs again).
   uint32_t join_requested[kCount];
+  char assigned_key[kCount][kKeySize];
   // The device each copy has taken (empty if none).
   char key[kCount][kKeySize];
 };
 
-#define XE_CONTROLLER_INSTANCE_TABLE_NAME L"Local\\XeniaControllerInstances2"
-#define XE_CONTROLLER_INSTANCE_LOCK_NAME L"Local\\XeniaControllerInstances2Lock"
+#define XE_CONTROLLER_INSTANCE_TABLE_NAME L"Local\\XeniaControllerInstances3"
+#define XE_CONTROLLER_INSTANCE_LOCK_NAME L"Local\\XeniaControllerInstances3Lock"
 
 }  // namespace hid
 }  // namespace xe

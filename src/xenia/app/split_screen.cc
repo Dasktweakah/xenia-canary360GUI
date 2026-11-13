@@ -20,7 +20,6 @@
 #include "xenia/emulator.h"
 #include "xenia/hid/controller_instances.h"
 #include "xenia/hid/input_system.h"
-#include "xenia/hid/sdl/sdl_hid.h"
 #include "xenia/memory.h"
 #include "xenia/ui/presenter.h"
 #include "xenia/ui/window.h"
@@ -262,9 +261,15 @@ void SplitScreen::Tick() {
     }
     auto& table = *static_cast<hid::ControllerInstanceTable*>(table_);
     if (me_ == 0) {
-      table.join_open = ParseAddress(cvars::split_screen_join_address)
-                            ? ReadGuestJoinOpen()
-                            : 1;
+      const uint32_t join_open = ParseAddress(cvars::split_screen_join_address)
+                                     ? ReadGuestJoinOpen()
+                                     : 1;
+      if (join_open != table.join_open || !join_open_logged_) {
+        XELOGI("split_screen: other players {} join now",
+               join_open ? "can" : "can't");
+        join_open_logged_ = true;
+      }
+      table.join_open = join_open;
     }
     if (table.join_requested[me_]) {
       if (table.joined[me_]) {
@@ -272,6 +277,11 @@ void SplitScreen::Tick() {
       } else if (table.join_open) {
         table.join_requested[me_] = 0;
         table.joined[me_] = 1;
+        XELOGI("split_screen: player {} asked to join", me_ + 1);
+      } else if (!join_wait_logged_) {
+        XELOGI("split_screen: player {} waits for player 1's match to join",
+               me_ + 1);
+        join_wait_logged_ = true;
       }
     }
     std::memcpy(pid, table.pid, sizeof(pid));
@@ -343,11 +353,10 @@ void SplitScreen::Tick() {
   }
   WriteGuestStrip(placement.visible && placement.strip);
 
-  // A copy waiting for its player: pause it after a while, and keep reading
-  // the controllers (a paused game doesn't ask for them) so the player can
-  // join.
+  // A copy waiting for its player: pause it after a while. (Its controllers
+  // aren't read while it's paused - SDL may be locked by a paused thread - a
+  // running copy sees the press and asks this one to join.)
   if (!placement.visible) {
-    xe::hid::sdl::PumpEvents();
     const auto waited = std::chrono::steady_clock::now() - start_time_;
     if (!paused_by_us_ && cvars::split_screen_pause_after > 0 &&
         waited >= std::chrono::seconds(cvars::split_screen_pause_after) &&
@@ -426,6 +435,11 @@ bool SplitScreen::ReadGuestJoinOpen() {
   uint32_t protect = 0;
   if (!heap || !heap->QueryProtect(address, &protect) ||
       !(protect & kMemoryProtectRead)) {
+    if (!join_read_failure_logged_) {
+      XELOGW("split_screen: can't read split_screen_join_address {:08X} ({})",
+             address, protect);
+      join_read_failure_logged_ = true;
+    }
     return false;
   }
   return xe::load_and_swap<uint32_t>(

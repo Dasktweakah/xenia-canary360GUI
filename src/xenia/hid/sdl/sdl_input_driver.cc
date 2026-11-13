@@ -771,6 +771,13 @@ void SDLInputDriver::OnControllerDeviceButtonChanged(const SDL_Event& event) {
   if (InstanceMode()) {
     if (!instance_port_ || *instance_port_ != *idx) {
       // Not this copy's controller: a press may make it so.
+      if (event.cbutton.state == SDL_PRESSED &&
+          xbutton != X_INPUT_GAMEPAD_GUIDE && cvars::split_screen &&
+          instance_port_) {
+        // split_screen: this copy has its controller; a press on one nobody
+        // has lets the next player waiting join (their copy may be paused).
+        OfferJoin(controllers_.at(*idx).device_key);
+      }
       if (instance_port_ || event.cbutton.state != SDL_PRESSED ||
           xbutton == X_INPUT_GAMEPAD_GUIDE ||
           !ClaimForInstance(controllers_.at(*idx).device_key, false)) {
@@ -884,6 +891,7 @@ void SDLInputDriver::OpenInstanceTable() {
   table->key[me][0] = '\0';
   table->joined[me] = 0;
   table->join_requested[me] = 0;
+  table->assigned_key[me][0] = '\0';
 #endif  // XE_PLATFORM_WIN32
   XELOGI(
       "SDL controller_instance: this copy is player {}; it takes the next "
@@ -902,6 +910,7 @@ void SDLInputDriver::CloseInstanceTable() {
         instance_table_->key[me][0] = '\0';
         instance_table_->joined[me] = 0;
         instance_table_->join_requested[me] = 0;
+        instance_table_->assigned_key[me][0] = '\0';
       }
     }
     UnmapViewOfFile(instance_table_);
@@ -958,6 +967,7 @@ bool SDLInputDriver::ClaimForInstance(const std::string& device_key,
     }
     table.pid[me] = GetCurrentProcessId();
     table.joined[me] = 1;
+    table.assigned_key[me][0] = '\0';
     std::strncpy(table.key[me], device_key.c_str(),
                  InstanceTable::kKeySize - 1);
     table.key[me][InstanceTable::kKeySize - 1] = '\0';
@@ -965,6 +975,71 @@ bool SDLInputDriver::ClaimForInstance(const std::string& device_key,
   }
 #endif          // XE_PLATFORM_WIN32
   return true;  // no table: this copy takes the first controller pressed
+}
+
+void SDLInputDriver::OfferJoin(const std::string& device_key) {
+#if XE_PLATFORM_WIN32
+  if (!instance_table_) {
+    return;
+  }
+  InstanceLock lock(instance_mutex_);
+  if (!lock.locked()) {
+    return;
+  }
+  auto& table = *instance_table_;
+  if (!table.join_open) {
+    return;
+  }
+  for (size_t i = 0; i < HID_SDL_USER_COUNT; i++) {
+    if (device_key == table.key[i] || device_key == table.assigned_key[i]) {
+      return;  // already a copy's
+    }
+  }
+  for (size_t i = 0; i < HID_SDL_USER_COUNT; i++) {
+    // Player 1's copy (0) never waits to join.
+    if (i == 0 || !ProcessRunning(table.pid[i]) || table.joined[i] ||
+        table.key[i][0] || table.assigned_key[i][0]) {
+      continue;
+    }
+    std::strncpy(table.assigned_key[i], device_key.c_str(),
+                 InstanceTable::kKeySize - 1);
+    table.assigned_key[i][InstanceTable::kKeySize - 1] = '\0';
+    table.join_requested[i] = 1;
+    XELOGI("SDL split_screen: {} joins as player {}", device_key, i + 1);
+    return;
+  }
+#endif  // XE_PLATFORM_WIN32
+}
+
+void SDLInputDriver::TakeAssignedController() {
+#if XE_PLATFORM_WIN32
+  if (!instance_table_ || instance_port_) {
+    return;
+  }
+  const auto now = std::chrono::steady_clock::now();
+  if (now - instance_assigned_check_ < std::chrono::milliseconds(250)) {
+    return;
+  }
+  instance_assigned_check_ = now;
+  std::string assigned;
+  {
+    InstanceLock lock(instance_mutex_);
+    if (!lock.locked()) {
+      return;
+    }
+    assigned = instance_table_->assigned_key[InstanceIndex()];
+  }
+  if (assigned.empty()) {
+    return;
+  }
+  for (size_t i = 0; i < controllers_.size(); i++) {
+    if (controllers_.at(i).sdl && controllers_.at(i).device_key == assigned &&
+        ClaimForInstance(assigned, true)) {
+      TakeInstanceController(i);
+      return;
+    }
+  }
+#endif  // XE_PLATFORM_WIN32
 }
 
 void SDLInputDriver::ReleaseInstanceClaim() {
@@ -1265,6 +1340,10 @@ void SDLInputDriver::QueueControllerUpdate() {
   if (!is_queued) {
     window()->app_context().CallInUIThread([this]() {
       SDL_PumpEvents();
+      if (cvars::split_screen && InstanceMode()) {
+        // A player who joined with a press seen by another copy.
+        TakeAssignedController();
+      }
       sdl_pumpevents_queued_ = false;
     });
   }

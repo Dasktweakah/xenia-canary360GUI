@@ -9,6 +9,7 @@
 
 #include "src/xenia/kernel/xsocket.h"
 
+#include <algorithm>
 #include <cstring>
 
 #include "xenia/base/cvar.h"
@@ -95,6 +96,7 @@ X_STATUS XSocket::Initialize(AddressFamily af, Type type, Protocol proto) {
 }
 
 X_STATUS XSocket::Close() {
+  StopAsyncRecv();
 #if XE_PLATFORM_WIN32
   int ret = closesocket(native_handle_);
 #else
@@ -439,6 +441,85 @@ X_STATUS XSocket::GetSockName(uint8_t* buf, int* buf_len) {
 
   std::memcpy(buf, &sa, *buf_len);
   return X_STATUS_SUCCESS;
+}
+
+void XSocket::RecvFromAsync(uint32_t max_len, RecvDone done) {
+  std::lock_guard<std::mutex> lock(async_mutex_);
+  if (async_stop_) {
+    return;
+  }
+  async_recvs_.emplace_back(max_len, std::move(done));
+  if (!async_thread_.joinable()) {
+    async_thread_ = std::thread([this]() { AsyncRecvThread(); });
+  }
+  async_cv_.notify_one();
+}
+
+void XSocket::AsyncRecvThread() {
+  std::vector<uint8_t> buffer;
+  while (true) {
+    std::pair<uint32_t, RecvDone> recv;
+    {
+      std::unique_lock<std::mutex> lock(async_mutex_);
+      async_cv_.wait(lock,
+                     [this]() { return async_stop_ || !async_recvs_.empty(); });
+      if (async_stop_) {
+        return;
+      }
+      recv = std::move(async_recvs_.front());
+      async_recvs_.pop_front();
+    }
+    // Wait (in short steps, so a closing socket is noticed) for a packet.
+    while (true) {
+      {
+        std::lock_guard<std::mutex> lock(async_mutex_);
+        if (async_stop_) {
+          return;
+        }
+      }
+      fd_set read_set;
+      FD_ZERO(&read_set);
+#if XE_PLATFORM_WIN32
+      FD_SET(static_cast<SOCKET>(native_handle_), &read_set);
+#else
+      FD_SET(static_cast<int>(native_handle_), &read_set);
+#endif
+      timeval timeout = {0, 50000};
+      const int ready = select(static_cast<int>(native_handle_ + 1), &read_set,
+                               nullptr, nullptr, &timeout);
+      if (ready < 0) {
+        recv.second(-1, nullptr, {}, GetLastWSAError());
+        break;
+      }
+      if (ready == 0) {
+        continue;
+      }
+      buffer.resize(std::max<uint32_t>(recv.first, 1));
+      N_XSOCKADDR_IN from = {};
+      uint32_t from_len = sizeof(from);
+      const int result =
+          RecvFrom(buffer.data(), recv.first, 0, &from, &from_len);
+      if (result < 0 && GetLastWSAError() == 10035) {
+        continue;  // WSAEWOULDBLOCK: someone else took it
+      }
+      recv.second(result, buffer.data(), from,
+                  result < 0 ? GetLastWSAError() : 0);
+      break;
+    }
+  }
+}
+
+void XSocket::StopAsyncRecv() {
+  {
+    std::lock_guard<std::mutex> lock(async_mutex_);
+    async_stop_ = true;
+    async_recvs_.clear();
+  }
+  async_cv_.notify_all();
+  if (async_thread_.joinable() &&
+      async_thread_.get_id() != std::this_thread::get_id()) {
+    async_thread_.join();
+  }
 }
 
 uint32_t XSocket::GetLastWSAError() const {

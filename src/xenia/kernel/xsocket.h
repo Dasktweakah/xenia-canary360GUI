@@ -10,8 +10,12 @@
 #ifndef XENIA_KERNEL_XSOCKET_H_
 #define XENIA_KERNEL_XSOCKET_H_
 
+#include <condition_variable>
 #include <cstring>
+#include <deque>
+#include <functional>
 #include <queue>
+#include <thread>
 
 #include "xenia/base/byte_order.h"
 #include "xenia/kernel/xobject.h"
@@ -131,6 +135,15 @@ class XSocket : public XObject {
 
   uint32_t GetLastWSAError() const;
 
+  // Basically360: an overlapped receive (WSARecvFrom with an OVERLAPPED) that
+  // found nothing waiting. A host thread waits for the socket's next packet
+  // (up to max_len bytes) and hands it to done: the result recvfrom gave (the
+  // length, or -1 with the WSA error), the data and where it came from.
+  using RecvDone =
+      std::function<void(int result, const uint8_t* data,
+                         const N_XSOCKADDR_IN& from, uint32_t wsa_error)>;
+  void RecvFromAsync(uint32_t max_len, RecvDone done);
+
   // Basically360: xnet_address as a number in host byte order, 0 when unset.
   static uint32_t InstanceAddress();
 
@@ -161,6 +174,15 @@ class XSocket : public XObject {
   uint16_t bound_port_ = 0;
 
   bool broadcast_socket_ = false;
+
+  // RecvFromAsync's waiting receives and the thread that completes them.
+  void AsyncRecvThread();
+  void StopAsyncRecv();
+  std::mutex async_mutex_;
+  std::condition_variable async_cv_;
+  std::deque<std::pair<uint32_t, RecvDone>> async_recvs_;
+  std::thread async_thread_;
+  bool async_stop_ = false;
 
   std::unique_ptr<xe::threading::Event> event_;
   std::mutex incoming_packet_mutex_;

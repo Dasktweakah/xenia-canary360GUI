@@ -12,6 +12,8 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
@@ -460,25 +462,174 @@ dword_result_t NetDll_WSAGetLastError_entry() {
 }
 DECLARE_XAM_EXPORT1(NetDll_WSAGetLastError, kNetworking, kImplemented);
 
-dword_result_t NetDll_WSARecvFrom_entry(
-    dword_t caller, dword_t socket, pointer_t<XWSABUF> buffers_ptr,
-    dword_t buffer_count, lpdword_t num_bytes_recv, lpdword_t flags_ptr,
-    pointer_t<XSOCKADDR_IN> from_addr, pointer_t<XWSAOVERLAPPED> overlapped_ptr,
-    lpvoid_t completion_routine_ptr) {
-  if (overlapped_ptr) {
-    // auto evt = kernel_state()->object_table()->LookupObject<XEvent>(
-    //    overlapped_ptr->event_handle);
+// Basically360: WSARecvFrom, including overlapped receives. Garden
+// Warfare's network thread posts one on its game socket with an event, waits
+// for that event (or its wake-up event), then collects the packet with
+// WSAGetOverlappedResult. The stub returned an error, so nothing a peer sent
+// was ever read (two copies of the game on one PC, 12 Nov).
+namespace {
+constexpr uint32_t kWsaIoPending = 997;     // WSA_IO_PENDING
+constexpr uint32_t kWsaIoIncomplete = 996;  // WSA_IO_INCOMPLETE
+constexpr uint32_t kWsaWouldBlock = 10035;  // WSAEWOULDBLOCK
 
-    // if (evt) {
-    //  //evt->Set(0, false);
-    //}
+// Copies a received packet into the title's buffers and from address.
+void DeliverPacket(Memory* memory,
+                   const std::vector<std::pair<uint32_t, uint32_t>>& buffers,
+                   const uint8_t* data, uint32_t length, uint32_t from_guest,
+                   uint32_t from_len_guest, const N_XSOCKADDR_IN& from) {
+  uint32_t offset = 0;
+  for (const auto& [address, size] : buffers) {
+    if (offset >= length) {
+      break;
+    }
+    const uint32_t part = std::min(size, length - offset);
+    std::memcpy(memory->TranslateVirtual(address), data + offset, part);
+    offset += part;
+  }
+  if (from_guest) {
+    auto from_out = memory->TranslateVirtual<XSOCKADDR_IN*>(from_guest);
+    from_out->sin_family = from.sin_family;
+    from_out->sin_port = from.sin_port;
+    from_out->sin_addr = from.sin_addr;
+    std::memset(from_out->x_sin_zero, 0, sizeof(from_out->x_sin_zero));
+  }
+  if (from_len_guest) {
+    xe::store_and_swap<uint32_t>(memory->TranslateVirtual(from_len_guest),
+                                 sizeof(XSOCKADDR_IN));
+  }
+}
+}  // namespace
+
+dword_result_t NetDll_WSARecvFrom_entry(
+    dword_t caller, dword_t socket_handle, pointer_t<XWSABUF> buffers_ptr,
+    dword_t buffer_count, lpdword_t num_bytes_recv, lpdword_t flags_ptr,
+    pointer_t<XSOCKADDR_IN> from_ptr, lpdword_t from_len_ptr,
+    pointer_t<XWSAOVERLAPPED> overlapped_ptr, lpvoid_t completion_routine_ptr) {
+  auto socket =
+      kernel_state()->object_table()->LookupObject<XSocket>(socket_handle);
+  if (!socket) {
+    XThread::SetLastError(uint32_t(X_WSAError::X_WSAENOTSOCK));
+    return -1;
+  }
+  if (!buffers_ptr || !buffer_count) {
+    XThread::SetLastError(uint32_t(X_WSAError::X_WSAEFAULT));
+    return -1;
+  }
+  std::vector<std::pair<uint32_t, uint32_t>> buffers;
+  uint32_t total = 0;
+  for (uint32_t i = 0; i < buffer_count; i++) {
+    buffers.emplace_back(buffers_ptr[i].buf_ptr, buffers_ptr[i].len);
+    total += buffers_ptr[i].len;
+  }
+  Memory* memory = kernel_memory();
+  const uint32_t from_guest = from_ptr.guest_address();
+  const uint32_t from_len_guest = from_len_ptr.guest_address();
+
+  // A packet already waiting is received now.
+  std::vector<uint8_t> data(std::max<uint32_t>(total, 1));
+  N_XSOCKADDR_IN from = {};
+  uint32_t from_len = sizeof(from);
+  int result = socket->RecvFrom(data.data(), total, 0, &from, &from_len);
+  if (result >= 0) {
+    DeliverPacket(memory, buffers, data.data(), uint32_t(result), from_guest,
+                  from_len_guest, from);
+    if (num_bytes_recv) {
+      *num_bytes_recv = uint32_t(result);
+    }
+    if (flags_ptr) {
+      *flags_ptr = 0;
+    }
+    if (overlapped_ptr) {
+      overlapped_ptr->internal = X_STATUS_SUCCESS;
+      overlapped_ptr->internal_high = uint32_t(result);
+      if (overlapped_ptr->event_handle) {
+        xboxkrnl::xeNtSetEvent(overlapped_ptr->event_handle, nullptr);
+      }
+    }
+    return 0;
+  }
+  const uint32_t error = socket->GetLastWSAError();
+  if (error != kWsaWouldBlock || !overlapped_ptr) {
+    XThread::SetLastError(error);
+    return -1;
   }
 
-  // we're not going to be receiving packets any time soon
-  // return error so we don't wait on that - Cancerous
+  // Otherwise the receive completes when a packet arrives: the OVERLAPPED
+  // gets its status and length, and its event is set.
+  const uint32_t overlapped_guest = overlapped_ptr.guest_address();
+  overlapped_ptr->internal = X_STATUS_PENDING;
+  overlapped_ptr->internal_high = 0;
+  const uint32_t event_handle = overlapped_ptr->event_handle;
+  if (event_handle) {
+    xboxkrnl::xeNtClearEvent(event_handle);
+  }
+  socket->RecvFromAsync(
+      total,
+      [memory, buffers, from_guest, from_len_guest, overlapped_guest,
+       event_handle](int received, const uint8_t* packet,
+                     const N_XSOCKADDR_IN& packet_from, uint32_t wsa_error) {
+        auto overlapped =
+            memory->TranslateVirtual<XWSAOVERLAPPED*>(overlapped_guest);
+        if (received >= 0) {
+          DeliverPacket(memory, buffers, packet, uint32_t(received), from_guest,
+                        from_len_guest, packet_from);
+          overlapped->internal_high = uint32_t(received);
+          overlapped->internal = X_STATUS_SUCCESS;
+        } else {
+          overlapped->internal_high = wsa_error;
+          overlapped->internal = X_STATUS_UNSUCCESSFUL;
+        }
+        if (event_handle) {
+          xboxkrnl::xeNtSetEvent(event_handle, nullptr);
+        }
+      });
+  XThread::SetLastError(kWsaIoPending);
   return -1;
 }
-DECLARE_XAM_EXPORT2(NetDll_WSARecvFrom, kNetworking, kStub, kHighFrequency);
+DECLARE_XAM_EXPORT2(NetDll_WSARecvFrom, kNetworking, kImplemented,
+                    kHighFrequency);
+
+// Basically360: the result of an overlapped receive (see WSARecvFrom).
+dword_result_t NetDll_WSAGetOverlappedResult_entry(
+    dword_t caller, dword_t socket_handle,
+    pointer_t<XWSAOVERLAPPED> overlapped_ptr, lpdword_t bytes_ptr, dword_t wait,
+    lpdword_t flags_ptr) {
+  if (!overlapped_ptr) {
+    XThread::SetLastError(uint32_t(X_WSAError::X_WSAEFAULT));
+    return 0;
+  }
+  if (overlapped_ptr->internal == X_STATUS_PENDING) {
+    if (!wait || !overlapped_ptr->event_handle) {
+      XThread::SetLastError(kWsaIoIncomplete);
+      return 0;
+    }
+    auto event = kernel_state()->object_table()->LookupObject<XEvent>(
+        overlapped_ptr->event_handle);
+    if (event) {
+      event->Wait(3, 1, false, nullptr);
+    }
+    if (overlapped_ptr->internal == X_STATUS_PENDING) {
+      XThread::SetLastError(kWsaIoIncomplete);
+      return 0;
+    }
+  }
+  if (flags_ptr) {
+    *flags_ptr = 0;
+  }
+  if (overlapped_ptr->internal != X_STATUS_SUCCESS) {
+    if (bytes_ptr) {
+      *bytes_ptr = 0;
+    }
+    XThread::SetLastError(overlapped_ptr->internal_high);
+    return 0;
+  }
+  if (bytes_ptr) {
+    *bytes_ptr = overlapped_ptr->internal_high;
+  }
+  return 1;
+}
+DECLARE_XAM_EXPORT2(NetDll_WSAGetOverlappedResult, kNetworking, kImplemented,
+                    kHighFrequency);
 
 // If the socket is a VDP socket, buffer 0 is the game data length, and buffer 1
 // is the unencrypted game data.

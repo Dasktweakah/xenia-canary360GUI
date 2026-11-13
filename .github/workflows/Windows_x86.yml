@@ -10,6 +10,11 @@ jobs:
     # pull requests and other repos keep GitHub's machines.
     runs-on: ${{ (github.repository == 'Dasktweakah/xenia-canary360GUI' && github.event_name == 'push') && fromJSON('["self-hosted","Windows","X64"]') || 'windows-2025-vs2026' }}
 
+    # PowerShell 7 like GitHub's machines (Windows PowerShell 5.1 blocks the scripts and writes UTF-16).
+    defaults:
+      run:
+        shell: pwsh
+
     env:
       POWERSHELL_TELEMETRY_OPTOUT: 1
 

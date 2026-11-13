@@ -79,7 +79,8 @@ DEFINE_bool(
     split_screen, false,
     "Basically360, with controller_instance: live split screen on one "
     "monitor, one copy of Xenia per player started together in full screen. "
-    "Copy 1 fills the screen; the other copies wait hidden (and paused after "
+    "Copy 1 fills the screen; the other copies wait hidden (and slowed down "
+    "after "
     "split_screen_pause_after seconds) until a player joins by pressing a "
     "button on a controller no copy has, which works while player 1's game "
     "lets players join (split_screen_join_address). Then every window moves: "

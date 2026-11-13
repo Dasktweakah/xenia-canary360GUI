@@ -42,6 +42,8 @@ DEFINE_bool(
 namespace xe {
 namespace gpu {
 
+std::atomic<uint32_t> GraphicsSystem::slow_vblank_hz{0};
+
 // Nvidia Optimus/AMD PowerXpress support.
 // These exports force the process to trigger the discrete GPU in multi-GPU
 // systems.
@@ -188,6 +190,19 @@ X_STATUS GraphicsSystem::Setup(cpu::Processor* processor,
               // frame limiter thread.
               if (!kernel_state_->is_title_open()) {
                 xe::threading::Sleep(std::chrono::milliseconds(100));
+                continue;
+              }
+
+              // Basically360: slowed down (a split screen copy waiting).
+              const uint32_t slow_hz =
+                  slow_vblank_hz.load(std::memory_order_relaxed);
+              if (slow_hz) {
+                register_file()->values[XE_GPU_REG_D1MODE_V_COUNTER] +=
+                    GetResolution().second;
+                MarkVblank();
+                xe::threading::Sleep(std::chrono::milliseconds(
+                    std::max<uint32_t>(1, 1000 / slow_hz)));
+                vblank_deadline_reset_ = true;
                 continue;
               }
 

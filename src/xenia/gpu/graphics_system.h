@@ -38,6 +38,11 @@ class CommandProcessor;
 
 class GraphicsSystem {
  public:
+  // Basically360: while nonzero, the guest's vertical blanks come this many
+  // times a second (a copy waiting hidden for its player in live split screen
+  // runs slowly instead of being suspended).
+  static std::atomic<uint32_t> slow_vblank_hz;
+
   virtual ~GraphicsSystem();
 
   virtual std::string name() const = 0;

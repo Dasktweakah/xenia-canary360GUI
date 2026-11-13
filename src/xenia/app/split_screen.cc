@@ -18,6 +18,7 @@
 #include "xenia/base/memory.h"
 #include "xenia/base/platform.h"
 #include "xenia/emulator.h"
+#include "xenia/gpu/graphics_system.h"
 #include "xenia/hid/controller_instances.h"
 #include "xenia/hid/input_system.h"
 #include "xenia/memory.h"
@@ -56,8 +57,8 @@ DEFINE_string(
 DEFINE_int32(
     split_screen_pause_after, 75,
     "Basically360, split_screen: seconds after starting that a copy still "
-    "waiting for its player is paused (no CPU or GPU use until the player "
-    "joins). 0: never paused.",
+    "waiting for its player is slowed to 2 frames a second at idle priority "
+    "(little CPU or GPU use until the player joins). 0: never.",
     "Display");
 DEFINE_string(
     split_screen_join_script, "",
@@ -370,21 +371,26 @@ void SplitScreen::Tick() {
   }
   WriteGuestStrip(placement.visible && placement.strip);
 
-  // A copy waiting for its player: pause it after a while. (Its controllers
-  // aren't read while it's paused - SDL may be locked by a paused thread - a
-  // running copy sees the press and asks this one to join.)
+  // A copy waiting for its player: after a while, slow it to 2 frames a
+  // second at idle priority. (Not suspended: suspending the game's threads
+  // can leave a lock taken that the UI thread then waits for forever.)
   if (!placement.visible) {
     const auto waited = std::chrono::steady_clock::now() - start_time_;
     if (!paused_by_us_ && cvars::split_screen_pause_after > 0 &&
         waited >= std::chrono::seconds(cvars::split_screen_pause_after) &&
-        emulator_->is_title_open() && !emulator_->is_paused()) {
-      XELOGI("split_screen: pausing until player {} joins", me_ + 1);
-      emulator_->Pause();
+        emulator_->is_title_open()) {
+      XELOGI("split_screen: slowed down until player {} joins", me_ + 1);
+      gpu::GraphicsSystem::slow_vblank_hz.store(2);
+      normal_priority_ = GetPriorityClass(GetCurrentProcess());
+      SetPriorityClass(GetCurrentProcess(), IDLE_PRIORITY_CLASS);
       paused_by_us_ = true;
     }
   } else {
     if (paused_by_us_) {
-      emulator_->Resume();
+      gpu::GraphicsSystem::slow_vblank_hz.store(0);
+      if (normal_priority_) {
+        SetPriorityClass(GetCurrentProcess(), normal_priority_);
+      }
       paused_by_us_ = false;
     }
     if (joined_seen_) {

@@ -84,6 +84,7 @@ class SplitScreen {
   Placement placement_;
   std::chrono::steady_clock::time_point start_time_;
   bool paused_by_us_ = false;
+  unsigned long normal_priority_ = 0;
   bool joined_seen_ = false;
   bool join_open_logged_ = false;
   bool join_wait_logged_ = false;

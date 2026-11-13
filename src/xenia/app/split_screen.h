@@ -10,6 +10,7 @@
 #ifndef XENIA_APP_SPLIT_SCREEN_H_
 #define XENIA_APP_SPLIT_SCREEN_H_
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -91,6 +92,8 @@ class SplitScreen {
   bool join_wait_logged_ = false;
   bool join_read_failure_logged_ = false;
   std::chrono::steady_clock::time_point last_diagnostic_;
+  std::chrono::steady_clock::time_point last_debug_{};
+  std::array<uint32_t, 16> last_debug_words_{};
 
   std::vector<ScriptStep> script_;
   size_t script_step_ = 0;

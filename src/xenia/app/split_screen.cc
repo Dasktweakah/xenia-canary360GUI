@@ -74,6 +74,12 @@ DEFINE_string(
     "\"3,start,20,a,4,a\". Empty: none.",
     "Display");
 
+DEFINE_string(
+    split_screen_debug_address, "",
+    "Basically360, split_screen: guest address (hex) of 64 bytes a debugging "
+    "patch fills; logged every 2 seconds when they change. Empty: none.",
+    "Display");
+
 namespace xe {
 namespace app {
 
@@ -439,6 +445,30 @@ void SplitScreen::Tick() {
         why_strip,
         join_host ? int64_t(xe::load_and_swap<uint32_t>(join_host)) : -1,
         why_join, active_count);
+  }
+
+  // Debugging: 64 bytes a probe patch fills, logged when they change.
+  if (const uint32_t debug_address =
+          ParseAddress(cvars::split_screen_debug_address)) {
+    if (now - last_debug_ >= std::chrono::seconds(2)) {
+      last_debug_ = now;
+      if (const uint8_t* host = GuestFlag(emulator_->memory(), debug_address)) {
+        std::array<uint32_t, 16> words;
+        for (size_t i = 0; i < words.size(); ++i) {
+          words[i] = xe::load_and_swap<uint32_t>(host + 4 * i);
+        }
+        if (words != last_debug_words_) {
+          last_debug_words_ = words;
+          std::string text;
+          for (size_t i = 0; i < words.size(); ++i) {
+            float f;
+            std::memcpy(&f, &words[i], 4);
+            text += fmt::format("{}{:08X}({:g})", i ? " " : "", words[i], f);
+          }
+          XELOGI("split_screen debug {:08X}: {}", debug_address, text);
+        }
+      }
+    }
   }
 
   // A copy waiting for its player: after a while, slow it to 2 frames a

@@ -73,7 +73,7 @@ jobs:
           $SUBMODULES=(Select-String -CaseSensitive '(?<=path = )(?!third_party\/xbyak_aarch64).+' .gitmodules).Matches.Value
           git submodule update --init --depth=1 -j $env:NUMBER_OF_PROCESSORS $SUBMODULES
 
-      - name: Find Python
+      - name: Find Python and 7-Zip
         # GitHub's machines have it on PATH. On the self-hosted runner use an all-users
         # install if there is one, otherwise a private copy (NuGet package, no installer).
         run: |-
@@ -94,6 +94,14 @@ jobs:
           echo "Using $($found.FullName)"
           & $found.FullName --version
           echo $found.DirectoryName >> $env:GITHUB_PATH
+          # 7-Zip for packaging: on PATH on GitHub's machines, Program Files on the self-hosted one.
+          if (-not (Get-Command 7z -ErrorAction SilentlyContinue)) {
+            if (Test-Path "$env:ProgramFiles\7-Zip\7z.exe") {
+              echo "$env:ProgramFiles\7-Zip" >> $env:GITHUB_PATH
+            } else {
+              echo "::error:: 7-Zip not found (install it from https://www.7-zip.org)"; exit 1
+            }
+          }
 
       - name: Build Xenia
         run: python xenia-build.py build --config=Release --target=xenia-app

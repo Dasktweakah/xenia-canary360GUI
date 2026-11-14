@@ -50,6 +50,12 @@ DEFINE_bool(
     "especially with several emulators sharing the GPU; for games that only "
     "need the exported data a little later.",
     "GPU");
+DEFINE_uint32(
+    readback_resolve_max_bytes, 0,
+    "With readback_resolve: only resolves writing at most this many bytes are "
+    "read back to the CPU (0: all). Large resolves are usually render targets "
+    "the GPU itself reads later; each read back costs a PCIe transfer.",
+    "GPU");
 DEFINE_bool(
     d3d12_gpu_pass_timing, false,
     "Measure with GPU timestamps how long the GPU spends on each part of "

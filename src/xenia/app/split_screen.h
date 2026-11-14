@@ -64,6 +64,10 @@ class SplitScreen {
   void WriteGuestStrip(uint32_t rows);
   bool ReadGuestJoinOpen();
   void RunScript();
+  uint32_t StripRows(const float rect[4]);
+  void SetSlowed(int32_t frames_per_second, bool idle);
+  bool ReadGuestInMatch();
+  void TickPrejoin(bool join_open, std::chrono::steady_clock::time_point now);
   static std::vector<ScriptStep> ParseScript(const std::string& text);
 
   Emulator* emulator_;
@@ -99,6 +103,14 @@ class SplitScreen {
   size_t script_step_ = 0;
   std::chrono::steady_clock::time_point script_step_time_;
   bool script_button_down_ = false;
+
+  // split_screen_prejoin: this copy is going (or has gone) into player 1's
+  // match ahead of time, hidden.
+  bool prejoin_started_ = false;
+  bool prejoin_ready_ = false;
+  std::chrono::steady_clock::time_point prejoin_time_;
+  bool in_match_seen_ = false;
+  std::chrono::steady_clock::time_point in_match_time_;
 };
 
 }  // namespace app

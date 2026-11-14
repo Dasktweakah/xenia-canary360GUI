@@ -74,6 +74,27 @@ DEFINE_string(
     "\"3,start,20,a,4,a\". Empty: none.",
     "Display");
 
+DEFINE_bool(
+    split_screen_prejoin, false,
+    "Basically360, split_screen: a copy waiting for its player goes into "
+    "player 1's match ahead of time, hidden (with split_screen_join_script, "
+    "once player 1's match lets players join), drawn with the shape it gets "
+    "when its player joins, and waits at the character select screen; a "
+    "player who joins is then there at once, like on the Xbox One. The "
+    "waiting player is in player 1's match all along.",
+    "Display");
+DEFINE_int32(
+    split_screen_prejoin_after, 40,
+    "Basically360, split_screen_prejoin: seconds after starting before a "
+    "waiting copy may go into player 1's match (its title screen up).",
+    "Display");
+DEFINE_int32(
+    split_screen_prejoin_fps, 10,
+    "Basically360, split_screen_prejoin: frames a second a copy waiting at "
+    "the character select screen runs at until its player joins (0: full "
+    "speed).",
+    "Display");
+
 DEFINE_string(
     split_screen_debug_address, "",
     "Basically360, split_screen: guest address (hex) of 64 bytes a debugging "
@@ -306,6 +327,7 @@ void SplitScreen::Tick() {
   }
   uint32_t pid[kCount];
   uint32_t joined[kCount];
+  bool join_open_now = false;
   {
     TableLock lock(table_mutex_);
     if (!lock.locked()) {
@@ -340,6 +362,7 @@ void SplitScreen::Tick() {
     }
     std::memcpy(pid, table.pid, sizeof(pid));
     std::memcpy(joined, table.joined, sizeof(joined));
+    join_open_now = table.join_open != 0;
   }
 
   // The copies on screen, in player order: player 1's while it runs, the
@@ -396,25 +419,34 @@ void SplitScreen::Tick() {
     if (placement.visible && !placement_.visible && placement_applied_ &&
         me_ != 0) {
       // This player has just joined.
-      XELOGI("split_screen: player {} joined ({} on screen)", me_ + 1,
-             active_count);
-      script_step_ = 0;
-      script_step_time_ = std::chrono::steady_clock::now();
-      script_button_down_ = false;
+      XELOGI("split_screen: player {} joined ({} on screen){}", me_ + 1,
+             active_count,
+             prejoin_ready_     ? ", already at the character select screen"
+             : prejoin_started_ ? ", on the way into the match"
+                                : "");
+      if (!prejoin_started_) {
+        script_step_ = 0;
+        script_step_time_ = std::chrono::steady_clock::now();
+        script_button_down_ = false;
+      }
       joined_seen_ = true;
     }
     ApplyPlacement(placement);
   }
   // A strip: the game draws its view in the top rows of its 1280x720 picture,
-  // as many as give the window's shape (a multiple of 16), shown filling it.
+  // as many as give the strip's shape (a multiple of 16), shown filling it.
+  // A copy going into player 1's match ahead of time (hidden) is drawn with
+  // the shape it gets when its player joins (the next one on screen), so its
+  // screens are made with that shape and nothing changes when it appears.
   uint32_t rows = 0;
-  if (placement.visible && placement.strip &&
-      ParseAddress(cvars::split_screen_strip_address)) {
-    const uint32_t width = window_->GetActualPhysicalWidth();
-    const uint32_t height = window_->GetActualPhysicalHeight();
-    if (width && height) {
-      rows = uint32_t(1280.0 * double(height) / double(width)) & ~uint32_t(15);
-      rows = std::min(std::max(rows, uint32_t(176)), uint32_t(704));
+  if (ParseAddress(cvars::split_screen_strip_address)) {
+    if (placement.visible) {
+      if (placement.strip) {
+        rows = StripRows(placement.rect);
+      }
+    } else if (prejoin_started_ && active_count + 1 == 2) {
+      const float next_rect[4] = {0.0f, 50.0f, 100.0f, 50.0f};
+      rows = StripRows(next_rect);
     }
   }
   if (rows != strip_rows_) {
@@ -475,6 +507,12 @@ void SplitScreen::Tick() {
   // second at idle priority. (Not suspended: suspending the game's threads
   // can leave a lock taken that the UI thread then waits for forever.)
   if (!placement.visible) {
+    if (cvars::split_screen_prejoin && me_ != 0) {
+      TickPrejoin(join_open_now, now);
+      if (prejoin_started_) {
+        return;
+      }
+    }
     const auto waited = std::chrono::steady_clock::now() - start_time_;
     if (!paused_by_us_ && cvars::split_screen_pause_after > 0 &&
         waited >= std::chrono::seconds(cvars::split_screen_pause_after) &&
@@ -498,6 +536,123 @@ void SplitScreen::Tick() {
     }
   }
 #endif  // XE_PLATFORM_WIN32
+}
+
+uint32_t SplitScreen::StripRows(const float rect[4]) {
+  // The part of the screen the copy fills (fullscreen: of its monitor).
+  double width = 0.0, height = 0.0;
+#if XE_PLATFORM_WIN32
+  HWND hwnd = static_cast<ui::Win32Window*>(window_)->hwnd();
+  HMONITOR monitor =
+      hwnd ? MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY) : nullptr;
+  MONITORINFO monitor_info;
+  monitor_info.cbSize = sizeof(monitor_info);
+  if (monitor && GetMonitorInfo(monitor, &monitor_info)) {
+    width = double(monitor_info.rcMonitor.right - monitor_info.rcMonitor.left) *
+            rect[2] / 100.0;
+    height =
+        double(monitor_info.rcMonitor.bottom - monitor_info.rcMonitor.top) *
+        rect[3] / 100.0;
+  }
+#endif  // XE_PLATFORM_WIN32
+  if (width < 1.0 || height < 1.0) {
+    width = double(window_->GetActualPhysicalWidth());
+    height = double(window_->GetActualPhysicalHeight());
+  }
+  if (width < 1.0 || height < 1.0) {
+    return 0;
+  }
+  uint32_t rows = uint32_t(1280.0 * height / width) & ~uint32_t(15);
+  return std::min(std::max(rows, uint32_t(176)), uint32_t(704));
+}
+
+void SplitScreen::SetSlowed(int32_t frames_per_second, bool idle) {
+#if XE_PLATFORM_WIN32
+  if (frames_per_second > 0) {
+    gpu::GraphicsSystem::slow_vblank_hz.store(uint32_t(frames_per_second));
+    if (!paused_by_us_) {
+      normal_priority_ = GetPriorityClass(GetCurrentProcess());
+    }
+    SetPriorityClass(GetCurrentProcess(),
+                     idle ? IDLE_PRIORITY_CLASS : BELOW_NORMAL_PRIORITY_CLASS);
+    paused_by_us_ = true;
+  } else if (paused_by_us_) {
+    gpu::GraphicsSystem::slow_vblank_hz.store(0);
+    if (normal_priority_) {
+      SetPriorityClass(GetCurrentProcess(), normal_priority_);
+    }
+    paused_by_us_ = false;
+  }
+#endif  // XE_PLATFORM_WIN32
+}
+
+bool SplitScreen::ReadGuestInMatch() {
+  // The game patch's INMATCH word, 8 bytes after STRIP.
+  const uint32_t strip = ParseAddress(cvars::split_screen_strip_address);
+  if (!strip || !emulator_->is_title_open()) {
+    return false;
+  }
+  const uint8_t* host = GuestFlag(emulator_->memory(), strip + 8);
+  return host && xe::load_and_swap<uint32_t>(host) != 0;
+}
+
+void SplitScreen::TickPrejoin(bool join_open,
+                              std::chrono::steady_clock::time_point now) {
+  if (!prejoin_started_) {
+    // Waiting at the title screen until player 1's match lets players join.
+    if (join_open && emulator_->is_title_open() && !script_.empty() &&
+        now - start_time_ >=
+            std::chrono::seconds(
+                std::max(cvars::split_screen_prejoin_after, int32_t(0)))) {
+      SetSlowed(0, false);
+      prejoin_started_ = true;
+      prejoin_time_ = now;
+      script_step_ = 0;
+      script_step_time_ = now;
+      script_button_down_ = false;
+      XELOGI(
+          "split_screen: player {}'s copy goes into player 1's match ahead "
+          "of time (hidden)",
+          me_ + 1);
+    }
+    return;
+  }
+  if (script_step_ < script_.size()) {
+    RunScript();
+    if (script_step_ >= script_.size()) {
+      prejoin_time_ = now;
+      XELOGI("split_screen: player {}'s copy has asked to join the match",
+             me_ + 1);
+    }
+    return;
+  }
+  if (prejoin_ready_) {
+    return;
+  }
+  // In the match (the game patch says the match is drawn) for a while, or long
+  // enough after the script for the level to have loaded: at the character
+  // select screen.
+  if (ReadGuestInMatch()) {
+    if (!in_match_seen_) {
+      in_match_seen_ = true;
+      in_match_time_ = now;
+    }
+  } else {
+    in_match_seen_ = false;
+  }
+  if ((in_match_seen_ && now - in_match_time_ >= std::chrono::seconds(15)) ||
+      now - prejoin_time_ >= std::chrono::seconds(120)) {
+    prejoin_ready_ = true;
+    XELOGI(
+        "split_screen: player {}'s copy waits at the character select screen "
+        "({}){}",
+        me_ + 1, in_match_seen_ ? "in the match" : "by time",
+        cvars::split_screen_prejoin_fps > 0
+            ? fmt::format(", slowed to {} frames a second",
+                          cvars::split_screen_prejoin_fps)
+            : std::string());
+    SetSlowed(cvars::split_screen_prejoin_fps, false);
+  }
 }
 
 void SplitScreen::ApplyPlacement(const Placement& placement) {

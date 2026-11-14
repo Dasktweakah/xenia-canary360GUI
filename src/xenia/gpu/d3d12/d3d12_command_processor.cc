@@ -3348,6 +3348,10 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
           readback.total_size = memexport_total_size;
           readback.ranges = memexport_ranges_;
           CountMemExportReadback(memexport_ranges_, 0);
+          // Let the GPU start on it now: the guest may be waiting for it.
+          if (CanEndSubmissionImmediately()) {
+            EndSubmission(false);
+          }
         } else {
           const auto wait_start_time = std::chrono::steady_clock::now();
           const bool awaited = AwaitAllQueueOperationsCompletion();

@@ -118,6 +118,7 @@ class SplitScreen {
   uint64_t all_cores_mask_ = 0;
   uint64_t cores_mask_ = 0;
   uint64_t pin_mask_ = 0;
+  int gpu_priority_ = -1;
   std::vector<uint32_t> busy_threads_;
   std::vector<uint32_t> pinned_threads_;
   std::map<uint32_t, uint64_t> thread_times_;

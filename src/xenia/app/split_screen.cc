@@ -484,6 +484,32 @@ void SplitScreen::UpdateCores(bool on_screen, size_t position, size_t count) {
   // Windows would put an unfocused window's threads on the slow ones.
   const uint64_t pin_mask =
       on_screen && count >= 3 ? share(fast_core_masks_, position, count) : 0;
+  // GPU scheduling: Windows favours the focused window's GPU work, and the
+  // game waits for some of its GPU results (its render jobs are switched on
+  // by the GPU), so an unfocused copy waits longer for them each frame. The
+  // copies on screen all ask for high GPU priority, the waiting ones low.
+  const int gpu_priority = !on_screen   ? 1 /* below normal */
+                           : count >= 2 ? 4 /* high */
+                                        : 2 /* normal */;
+  if (gpu_priority != gpu_priority_) {
+    using SetPriorityFn = LONG(APIENTRY*)(HANDLE, int);
+    static const auto set_gpu_priority = reinterpret_cast<SetPriorityFn>(
+        GetProcAddress(LoadLibraryW(L"gdi32.dll"),
+                       "D3DKMTSetProcessSchedulingPriorityClass"));
+    const LONG status =
+        set_gpu_priority ? set_gpu_priority(GetCurrentProcess(), gpu_priority)
+                         : -1;
+    gpu_priority_ = gpu_priority;
+    if (status == 0) {
+      XELOGI("split_screen: GPU priority {}", gpu_priority == 4 ? "high"
+                                              : gpu_priority == 2
+                                                  ? "normal"
+                                                  : "below normal");
+    } else {
+      XELOGW("split_screen: could not set the GPU priority ({:X})",
+             uint32_t(status));
+    }
+  }
   if (!mask || (mask == cores_mask_ && pin_mask == pin_mask_)) {
     return;
   }

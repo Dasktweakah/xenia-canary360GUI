@@ -405,9 +405,8 @@ void SplitScreen::UpdateCores(bool on_screen, size_t position, size_t count) {
     std::map<uint32_t, std::pair<uint64_t, uint8_t>> cores;
     uint8_t fastest = 0;
     for (size_t offset = 0; offset < length;) {
-      const auto& info =
-          *reinterpret_cast<const SYSTEM_CPU_SET_INFORMATION*>(buffer.data() +
-                                                               offset);
+      const auto& info = *reinterpret_cast<const SYSTEM_CPU_SET_INFORMATION*>(
+          buffer.data() + offset);
       if (!info.Size) {
         break;
       }
@@ -439,8 +438,7 @@ void SplitScreen::UpdateCores(bool on_screen, size_t position, size_t count) {
   // Cores [begin, end) of n even shares, the share at index i.
   auto share = [](const std::vector<uint64_t>& masks, size_t i, size_t n) {
     uint64_t mask = 0;
-    for (size_t c = masks.size() * i / n; c < masks.size() * (i + 1) / n;
-         ++c) {
+    for (size_t c = masks.size() * i / n; c < masks.size() * (i + 1) / n; ++c) {
       mask |= masks[c];
     }
     return mask;

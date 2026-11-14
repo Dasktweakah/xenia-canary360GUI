@@ -76,8 +76,9 @@ DEFINE_string(
 
 DEFINE_bool(
     split_screen_prejoin, false,
-    "Basically360, split_screen: the next player's copy (the lowest numbered "
-    "one still waiting) goes into player 1's match ahead of time, hidden (with "
+    "Basically360, split_screen: while player 1 plays alone, the next "
+    "player's copy (the lowest numbered one waiting) goes into player 1's "
+    "match ahead of time, hidden (with "
     "split_screen_join_script, "
     "once player 1's match lets players join), drawn with the shape it gets "
     "when its player joins, and waits at the character select screen; a "
@@ -547,7 +548,11 @@ void SplitScreen::Tick() {
       // Only the next player to join goes in ahead of time (each player
       // waiting in player 1's match costs player 1's game frames): the copies
       // of lower numbered players have all joined, or aren't running.
-      bool next_in_line = true;
+      // Only while player 1 plays alone: every player in player 1's match
+      // costs both screens frames (two players: about 16 and 23 frames a
+      // second; a third one waiting: 12 and 17), so players 3 and 4 join the
+      // usual way.
+      bool next_in_line = active_count == 1;
       for (size_t i = 1; i < me_; ++i) {
         if (ProcessRunning(pid[i]) && !joined[i]) {
           next_in_line = false;

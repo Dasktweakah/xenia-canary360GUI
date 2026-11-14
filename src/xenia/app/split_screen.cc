@@ -558,6 +558,24 @@ void SplitScreen::Tick() {
     }
     if (joined_seen_) {
       RunScript();
+      // Player 1's match has ended (no joining for a while, past its score
+      // screen): this player's copy starts again, to wait for player 1's next
+      // match (player 1 then fills the screen again). The game drops the
+      // other players when its host leaves the match anyway.
+      if (cvars::split_screen_prejoin && me_ != 0) {
+        if (join_open_now) {
+          join_closed_seen_ = false;
+        } else if (!join_closed_seen_) {
+          join_closed_seen_ = true;
+          join_closed_time_ = now;
+        } else if (now - join_closed_time_ >= std::chrono::seconds(15)) {
+          XELOGI(
+              "split_screen: player 1's match has ended; player {}'s copy "
+              "starts again to wait for the next one",
+              me_ + 1);
+          Relaunch();
+        }
+      }
     }
   }
 #endif  // XE_PLATFORM_WIN32

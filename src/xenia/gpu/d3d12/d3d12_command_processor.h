@@ -324,6 +324,8 @@ class D3D12CommandProcessor final : public CommandProcessor {
                  uint32_t frontbuffer_height) override;
 
   void OnPrimaryBufferEnd() override;
+  void PrepareForWait() override;
+  void PollWhileWaiting() override;
 
   Shader* LoadShader(xenos::ShaderType shader_type, uint32_t guest_address,
                      const uint32_t* host_address,
@@ -511,6 +513,26 @@ class D3D12CommandProcessor final : public CommandProcessor {
   // Returns a buffer for reading GPU data back to the CPU. Assuming
   // synchronizing immediately after use. Always in COPY_DEST state.
   ID3D12Resource* RequestReadbackBuffer(uint32_t size);
+
+  // readback_memexport_async: a memexport's results reach guest memory once
+  // the GPU has done the draw, without waiting for it mid-frame.
+  struct MemExportReadback {
+    uint64_t submission = 0;
+    ID3D12Resource* buffer = nullptr;
+    uint32_t buffer_size = 0;
+    uint32_t total_size = 0;
+    std::vector<draw_util::MemExportRange> ranges;
+  };
+  ID3D12Resource* AcquireMemExportReadbackBuffer(uint32_t size,
+                                                 uint32_t& size_out);
+  // Copies the bytes the GPU changed (second half of the buffer against the
+  // snapshot in the first half) to guest memory.
+  void ApplyMemExportReadback(
+      ID3D12Resource* buffer, uint32_t total_size,
+      const std::vector<draw_util::MemExportRange>& ranges);
+  void PumpMemExportReadbacks();
+  void CountMemExportReadback(
+      const std::vector<draw_util::MemExportRange>& ranges, uint64_t wait_us);
 
   void WriteGammaRampSRV(bool is_pwl, D3D12_CPU_DESCRIPTOR_HANDLE handle) const;
   void WriteZPDCounterRawUAVDescriptor(
@@ -799,6 +821,14 @@ class D3D12CommandProcessor final : public CommandProcessor {
   // Simple single buffer for memexport (always syncs, no double-buffering)
   ID3D12Resource* memexport_readback_buffer_ = nullptr;
   uint32_t memexport_readback_buffer_size_ = 0;
+  std::deque<MemExportReadback> memexport_readbacks_pending_;
+  std::vector<std::pair<ID3D12Resource*, uint32_t>>
+      memexport_readback_buffers_free_;
+  // Memexport readback statistics, logged every 10 seconds.
+  uint64_t memexport_stat_count_ = 0;
+  uint64_t memexport_stat_wait_us_ = 0;
+  uint64_t memexport_stat_start_ms_ = 0;
+  std::unordered_map<uint32_t, uint32_t> memexport_stat_ranges_;
 
   // Resolve downscale compute shader for scaled resolution readback,
   // reversing the scaled resolve buffer packing back to 1x on the GPU.

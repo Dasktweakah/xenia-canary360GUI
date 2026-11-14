@@ -293,6 +293,8 @@ class CommandProcessor {
   virtual void MakeCoherent();
   virtual void PrepareForWait();
   virtual void ReturnFromWait();
+  // Called every few milliseconds while waiting for the guest's commands.
+  virtual void PollWhileWaiting() {}
 
   virtual void PollCompletedSubmission() {}
 

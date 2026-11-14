@@ -391,6 +391,7 @@ void CommandProcessor::WorkerThreadMain() {
           if (zpd_mode_ == ZPDMode::kStrict && zpd_awaited_report_count_) {
             PrepareForWait();
           }
+          PollWhileWaiting();
         } else {
           xe::threading::MaybeYield();
         }

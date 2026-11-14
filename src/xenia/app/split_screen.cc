@@ -378,6 +378,29 @@ void SplitScreen::SetFastCores(bool fast) {
     XELOGI("split_screen: this copy {}",
            fast ? "keeps the fast cores" : "may be put on slow cores");
   }
+  // Windows 11 also stops honouring the timer resolution Xenia asks for
+  // (0.5 ms) for programs it counts as in the background: their short
+  // sleeps (vertical blanks, the frame limiter) then last a whole 15.6 ms
+  // tick, and an unfocused copy drops to 16 frames a second. Every copy asks
+  // for its timer resolution to be honoured.
+  if (!timer_resolution_kept_) {
+#ifndef PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION
+#define PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION 0x4
+#endif
+    PROCESS_POWER_THROTTLING_STATE timer_state = {};
+    timer_state.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+    timer_state.ControlMask = PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION;
+    timer_state.StateMask = 0;
+    if (SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling,
+                              &timer_state, sizeof(timer_state))) {
+      timer_resolution_kept_ = true;
+      XELOGI("split_screen: timer resolution kept in the background");
+    } else {
+      timer_resolution_kept_ = true;
+      XELOGW("split_screen: could not keep the timer resolution ({})",
+             GetLastError());
+    }
+  }
 #endif  // XE_PLATFORM_WIN32
 }
 

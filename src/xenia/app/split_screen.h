@@ -110,6 +110,7 @@ class SplitScreen {
   uint64_t last_swap_count_ = 0;
   uint64_t last_process_time_ = 0;
   int fast_cores_ = -1;
+  bool timer_resolution_kept_ = false;
   bool cores_known_ = false;
   // Logical processor masks of the physical cores, fast and slow.
   std::vector<uint64_t> fast_core_masks_;

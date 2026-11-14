@@ -494,6 +494,16 @@ void SplitScreen::Tick() {
     const uint8_t* join_host =
         GuestFlag(emulator_->memory(),
                   ParseAddress(cvars::split_screen_join_address), &why_join);
+    const uint64_t swaps = gpu::GraphicsSystem::swap_count.load();
+    const double seconds =
+        std::chrono::duration<double>(now - last_swap_time_).count();
+    const double fps =
+        last_swap_time_.time_since_epoch().count() && seconds > 0.0
+            ? double(swaps - last_swap_count_) / seconds
+            : 0.0;
+    last_swap_count_ = swaps;
+    last_swap_time_ = now;
+    XELOGI("split_screen: {:.1f} frames a second", fps);
     XELOGI(
         "split_screen: title open {}, strip {} ({}), join flag {} ({}), "
         "players on screen {}",

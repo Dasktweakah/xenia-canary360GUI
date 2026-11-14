@@ -43,6 +43,7 @@ namespace xe {
 namespace gpu {
 
 std::atomic<uint32_t> GraphicsSystem::slow_vblank_hz{0};
+std::atomic<uint64_t> GraphicsSystem::swap_count{0};
 
 // Nvidia Optimus/AMD PowerXpress support.
 // These exports force the process to trigger the discrete GPU in multi-GPU

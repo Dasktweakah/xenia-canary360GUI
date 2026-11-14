@@ -472,6 +472,7 @@ void VdSwap_entry(
     lpdword_t frontbuffer_ptr,  // ptr to frontbuffer address
     lpdword_t texture_format_ptr, lpdword_t color_space_ptr, lpdword_t width,
     lpdword_t height) {
+  gpu::GraphicsSystem::swap_count.fetch_add(1, std::memory_order_relaxed);
   // All of these parameters are REQUIRED.
   assert(buffer_ptr);
   assert(fetch_ptr);

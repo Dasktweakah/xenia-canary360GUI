@@ -42,6 +42,8 @@ class GraphicsSystem {
   // times a second (a copy waiting hidden for its player in live split screen
   // runs slowly instead of being suspended).
   static std::atomic<uint32_t> slow_vblank_hz;
+  // Basically360: frames the guest has presented (VdSwap calls) so far.
+  static std::atomic<uint64_t> swap_count;
 
   virtual ~GraphicsSystem();
 

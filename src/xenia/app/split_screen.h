@@ -98,6 +98,8 @@ class SplitScreen {
   bool join_wait_logged_ = false;
   bool join_read_failure_logged_ = false;
   std::chrono::steady_clock::time_point last_diagnostic_;
+  std::chrono::steady_clock::time_point last_swap_time_{};
+  uint64_t last_swap_count_ = 0;
   std::chrono::steady_clock::time_point last_debug_{};
   std::array<uint32_t, 16> last_debug_words_{};
 

@@ -829,6 +829,9 @@ class D3D12CommandProcessor final : public CommandProcessor {
   uint64_t memexport_stat_wait_us_ = 0;
   uint64_t memexport_stat_start_ms_ = 0;
   std::unordered_map<uint32_t, uint32_t> memexport_stat_ranges_;
+  uint64_t gpu_stat_frames_ = 0;
+  uint64_t gpu_stat_wait_us_ = 0;
+  uint64_t gpu_stat_start_ms_ = 0;
 
   // Resolve downscale compute shader for scaled resolution readback,
   // reversing the scaled resolve buffer packing back to 1x on the GPU.

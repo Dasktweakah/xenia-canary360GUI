@@ -445,7 +445,12 @@ void SplitScreen::UpdateCores(bool on_screen, size_t position, size_t count) {
   };
   uint64_t mask;
   if (!on_screen) {
-    mask = share(slow_core_masks_, 0, 1);
+    // A few slow cores: a waiting copy's spinning threads would otherwise
+    // keep many cores busy, taking power (and so speed) from the players'.
+    mask = 0;
+    for (size_t c = 0; c < std::min(slow_core_masks_.size(), size_t(4)); ++c) {
+      mask |= slow_core_masks_[slow_core_masks_.size() - 1 - c];
+    }
   } else if (count <= 1) {
     mask = all_cores_mask_;
   } else {
@@ -540,8 +545,58 @@ void SplitScreen::LogLoad(double seconds) {
           ? double(process_total - last_process_time_) / (seconds * 1.0e7)
           : 0.0;
   last_process_time_ = process_total;
-  XELOGI("split_screen: load {:.1f} processors; busiest threads: {}", cores,
-         top);
+  // Clocks of the fast and slow cores (Windows' figures) and the power
+  // source: a laptop's cores slow down when many are busy or on battery.
+  std::string clocks;
+  struct ProcessorPowerInformation {
+    ULONG number;
+    ULONG max_mhz;
+    ULONG current_mhz;
+    ULONG mhz_limit;
+    ULONG max_idle_state;
+    ULONG current_idle_state;
+  };
+  using CallNtPowerInformationFn =
+      LONG(WINAPI*)(int, PVOID, ULONG, PVOID, ULONG);
+  static const auto call_nt_power_information =
+      reinterpret_cast<CallNtPowerInformationFn>(GetProcAddress(
+          LoadLibraryW(L"powrprof.dll"), "CallNtPowerInformation"));
+  const DWORD processor_count = GetActiveProcessorCount(0);
+  if (call_nt_power_information && processor_count && processor_count <= 64) {
+    std::vector<ProcessorPowerInformation> power(processor_count);
+    if (call_nt_power_information(
+            11 /* ProcessorInformation */, nullptr, 0, power.data(),
+            ULONG(power.size() * sizeof(ProcessorPowerInformation))) == 0) {
+      uint64_t fast_mask = 0;
+      for (uint64_t mask : fast_core_masks_) {
+        fast_mask |= mask;
+      }
+      double sums[2][3] = {};
+      for (const ProcessorPowerInformation& info : power) {
+        const int fast =
+            info.number < 64 && ((fast_mask >> info.number) & 1) ? 1 : 0;
+        sums[fast][0] += info.current_mhz;
+        sums[fast][1] += info.mhz_limit;
+        sums[fast][2] += 1.0;
+      }
+      for (int fast = 1; fast >= 0; --fast) {
+        if (sums[fast][2] > 0.0) {
+          clocks += fmt::format(
+              "{}{} cores {:.0f} MHz (limit {:.0f})",
+              clocks.empty() ? "" : ", ", fast ? "fast" : "slow",
+              sums[fast][0] / sums[fast][2], sums[fast][1] / sums[fast][2]);
+        }
+      }
+    }
+  }
+  SYSTEM_POWER_STATUS power_status;
+  if (GetSystemPowerStatus(&power_status)) {
+    clocks += power_status.ACLineStatus == 1   ? ", plugged in"
+              : power_status.ACLineStatus == 0 ? ", on battery"
+                                               : "";
+  }
+  XELOGI("split_screen: load {:.1f} processors; busiest threads: {}; {}", cores,
+         top, clocks);
 #endif  // XE_PLATFORM_WIN32
 }
 

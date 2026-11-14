@@ -51,8 +51,8 @@ DEFINE_bool(
     "need the exported data a little later.",
     "GPU");
 DEFINE_bool(readback_memexport_stats, false,
-            "Log memory export readbacks (count, wait time, addresses) every "
-            "10 seconds.",
+            "Log memory export readbacks (count, wait time, addresses) and the "
+            "time spent waiting for the GPU every 10 seconds.",
             "GPU");
 
 DECLARE_bool(clear_memory_page_state);
@@ -3815,10 +3815,34 @@ bool D3D12CommandProcessor::BeginSubmission(bool is_guest_command) {
   // Check the fence - needed for all kinds of submissions (to reclaim transient
   // resources early) and specifically for frames (not to queue too many), and
   // await the availability of the current frame.
+  const auto frame_wait_start = std::chrono::steady_clock::now();
   CheckSubmissionCompletion(
       is_opening_frame
           ? closed_frame_submissions_[frame_current_ % kQueueFrames]
           : 0);
+  if (is_opening_frame && cvars::readback_memexport_stats) {
+    // How long the emulator waits for the GPU to finish older frames: most of
+    // the time when the GPU is what limits the frame rate.
+    const auto now = std::chrono::steady_clock::now();
+    gpu_stat_wait_us_ +=
+        uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(
+                     now - frame_wait_start)
+                     .count());
+    ++gpu_stat_frames_;
+    const uint64_t now_ms = Clock::QueryHostUptimeMillis();
+    if (!gpu_stat_start_ms_) {
+      gpu_stat_start_ms_ = now_ms;
+    } else if (now_ms - gpu_stat_start_ms_ >= 10000) {
+      const double seconds = (now_ms - gpu_stat_start_ms_) / 1000.0;
+      XELOGI(
+          "GPU: {:.1f} frames a second, waiting {:.0f} ms a second for the GPU "
+          "to finish older frames",
+          gpu_stat_frames_ / seconds, gpu_stat_wait_us_ / 1000.0 / seconds);
+      gpu_stat_frames_ = 0;
+      gpu_stat_wait_us_ = 0;
+      gpu_stat_start_ms_ = now_ms;
+    }
+  }
   // TODO(Triang3l): If failed to await (completed submission < awaited frame
   // submission), do something like dropping the draw command that wanted to
   // open the frame.

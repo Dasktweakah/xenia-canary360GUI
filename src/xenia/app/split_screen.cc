@@ -445,12 +445,7 @@ void SplitScreen::UpdateCores(bool on_screen, size_t position, size_t count) {
   };
   uint64_t mask;
   if (!on_screen) {
-    // A few slow cores: a waiting copy's spinning threads would otherwise
-    // keep many cores busy, taking power (and so speed) from the players'.
-    mask = 0;
-    for (size_t c = 0; c < std::min(slow_core_masks_.size(), size_t(4)); ++c) {
-      mask |= slow_core_masks_[slow_core_masks_.size() - 1 - c];
-    }
+    mask = share(slow_core_masks_, 0, 1);
   } else if (count <= 1) {
     mask = all_cores_mask_;
   } else {

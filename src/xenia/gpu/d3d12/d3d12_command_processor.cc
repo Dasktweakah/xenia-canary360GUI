@@ -57,6 +57,7 @@ DEFINE_bool(readback_memexport_stats, false,
 
 DECLARE_bool(clear_memory_page_state);
 DECLARE_bool(readback_resolve_half_pixel_offset);
+DECLARE_string(readback_resolve);
 
 namespace xe {
 namespace gpu {
@@ -3670,19 +3671,25 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
         readback_length);
   }
 
-  if (readback_mode != ReadbackResolveMode::kFast) {
-    // Wait for GPU to finish (accurate but slow)
-    if (!AwaitAllQueueOperationsCompletion()) {
-      return true;
+  if (readback_mode != ReadbackResolveMode::kFast || read_cache_miss) {
+    // Full: wait for GPU to finish (accurate but slow). Fast: the previous
+    // buffer doesn't exist - use the current buffer with a sync as a
+    // fallback.
+    if (readback_mode == ReadbackResolveMode::kFast) {
+      read_index = write_index;
     }
-  } else if (read_cache_miss) {
-    // Delayed sync, but the previous buffer doesn't exist - use the current
-    // buffer with a sync as a fallback.
-    read_index = write_index;
-    if (!AwaitAllQueueOperationsCompletion()) {
+    const auto wait_start = std::chrono::steady_clock::now();
+    const bool awaited = AwaitAllQueueOperationsCompletion();
+    ++gpu_stat_resolve_waits_;
+    gpu_stat_resolve_wait_us_ +=
+        uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(
+                     std::chrono::steady_clock::now() - wait_start)
+                     .count());
+    if (!awaited) {
       return true;
     }
   }
+  ++gpu_stat_resolve_readbacks_;
 
   ID3D12Resource* read_source = rb.buffers[read_index];
   if (read_source != nullptr && readback_length <= rb.sizes[read_index]) {
@@ -3836,10 +3843,17 @@ bool D3D12CommandProcessor::BeginSubmission(bool is_guest_command) {
       const double seconds = (now_ms - gpu_stat_start_ms_) / 1000.0;
       XELOGI(
           "GPU: {:.1f} frames a second, waiting {:.0f} ms a second for the GPU "
-          "to finish older frames",
-          gpu_stat_frames_ / seconds, gpu_stat_wait_us_ / 1000.0 / seconds);
+          "to finish older frames; resolve readbacks ({}) {:.1f} a second, "
+          "{:.1f} of them waited for, {:.0f} ms a second waiting",
+          gpu_stat_frames_ / seconds, gpu_stat_wait_us_ / 1000.0 / seconds,
+          cvars::readback_resolve, gpu_stat_resolve_readbacks_ / seconds,
+          gpu_stat_resolve_waits_ / seconds,
+          gpu_stat_resolve_wait_us_ / 1000.0 / seconds);
       gpu_stat_frames_ = 0;
       gpu_stat_wait_us_ = 0;
+      gpu_stat_resolve_readbacks_ = 0;
+      gpu_stat_resolve_waits_ = 0;
+      gpu_stat_resolve_wait_us_ = 0;
       gpu_stat_start_ms_ = now_ms;
     }
   }

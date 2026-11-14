@@ -104,8 +104,9 @@ DEFINE_int32(
 DEFINE_int32(
     split_screen_strip_view_top, 8,
     "Basically360, split_screen: rows of its picture a game (patched) leaves "
-    "above its view while a match is drawn in a strip (Garden Warfare: 8, its "
-    "1280x704 view placed 8 rows down); the strip shows from there.",
+    "above its view in a strip (Garden Warfare: 8, its 1280x704 view placed 8 "
+    "rows down); the game is told that many rows more and the strip shows from "
+    "there.",
     "Display");
 
 DEFINE_string(
@@ -462,22 +463,25 @@ void SplitScreen::Tick() {
       rows = StripRows(next_rect);
     }
   }
-  // While a match is drawn the game puts its view a few rows down (Garden
-  // Warfare: 8): the strip shows from there, without a black line on top.
+  // The game draws its view a few rows down its picture (Garden Warfare: 8,
+  // its 1280x704 view placed 8 rows down) and no further than the rows it is
+  // told: it is told that many rows more, and the strip shows from there, with
+  // exactly the strip's shape (no black line on top, nothing undrawn below).
   const uint32_t top =
-      rows && ReadGuestInMatch()
-          ? uint32_t(std::min(std::max(cvars::split_screen_strip_view_top, 0),
-                              int32_t(720 - rows)))
-          : 0;
-  if (rows != strip_rows_ || top != strip_top_) {
-    strip_rows_ = rows;
+      rows ? uint32_t(std::min(std::max(cvars::split_screen_strip_view_top, 0),
+                               int32_t(64)))
+           : 0;
+  const uint32_t game_rows =
+      rows ? std::min((rows + top + 4) & ~uint32_t(7), uint32_t(704)) : 0;
+  if (game_rows != strip_rows_ || top != strip_top_) {
+    strip_rows_ = game_rows;
     strip_top_ = top;
-    if (rows) {
+    if (game_rows) {
       ui::Presenter::SetCropOverride(0.0f, float(top) * 100.0f / 720.0f, 100.0f,
-                                     float(rows) * 100.0f / 720.0f);
+                                     float(game_rows - top) * 100.0f / 720.0f);
     }
   }
-  WriteGuestStrip(rows);
+  WriteGuestStrip(game_rows);
 
   // Diagnostics every 10 seconds: the flags as this copy sees them.
   const auto now = std::chrono::steady_clock::now();
@@ -583,8 +587,9 @@ uint32_t SplitScreen::StripRows(const float rect[4]) {
   if (width < 1.0 || height < 1.0) {
     return 0;
   }
-  uint32_t rows = uint32_t(1280.0 * height / width) & ~uint32_t(15);
-  return std::min(std::max(rows, uint32_t(176)), uint32_t(704));
+  // The strip's shape in rows of the 1280-wide picture.
+  uint32_t rows = uint32_t(1280.0 * height / width + 0.5);
+  return std::min(std::max(rows, uint32_t(176)), uint32_t(640));
 }
 
 void SplitScreen::SetSlowed(int32_t frames_per_second, bool idle) {

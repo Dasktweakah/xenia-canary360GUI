@@ -10,6 +10,7 @@
 #include "xenia/app/split_screen.h"
 
 #include <algorithm>
+#include <bitset>
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
@@ -120,6 +121,13 @@ DEFINE_string(
     split_screen_cpu_mask, "",
     "Basically360, split_screen: logical processors this copy runs on, as a "
     "hex mask (bit 0: processor 0), e.g. 0xFFFF. Empty: all.",
+    "Display");
+
+DEFINE_bool(
+    split_screen_auto_cores, true,
+    "Basically360, split_screen: on a processor with fast and slow cores, the "
+    "copies on screen share out the fast cores between them (each its own) "
+    "and the waiting copies get the slow ones. Not with split_screen_cpu_mask.",
     "Display");
 
 DEFINE_string(
@@ -373,6 +381,99 @@ void SplitScreen::SetFastCores(bool fast) {
 #endif  // XE_PLATFORM_WIN32
 }
 
+void SplitScreen::UpdateCores(bool on_screen, size_t position, size_t count) {
+#if XE_PLATFORM_WIN32
+  if (!cvars::split_screen_auto_cores ||
+      !cvars::split_screen_cpu_mask.empty()) {
+    return;
+  }
+  if (!cores_known_) {
+    cores_known_ = true;
+    ULONG length = 0;
+    GetSystemCpuSetInformation(nullptr, 0, &length, GetCurrentProcess(), 0);
+    std::vector<uint8_t> buffer(length);
+    if (!length ||
+        !GetSystemCpuSetInformation(
+            reinterpret_cast<PSYSTEM_CPU_SET_INFORMATION>(buffer.data()),
+            length, &length, GetCurrentProcess(), 0)) {
+      XELOGW("split_screen: could not read the processor's cores ({})",
+             GetLastError());
+      return;
+    }
+    // Physical cores (by group and core index) with their logical processors
+    // and efficiency class (higher: faster).
+    std::map<uint32_t, std::pair<uint64_t, uint8_t>> cores;
+    uint8_t fastest = 0;
+    for (size_t offset = 0; offset < length;) {
+      const auto& info =
+          *reinterpret_cast<const SYSTEM_CPU_SET_INFORMATION*>(buffer.data() +
+                                                               offset);
+      if (!info.Size) {
+        break;
+      }
+      offset += info.Size;
+      if (info.Type != CpuSetInformation || info.CpuSet.Group != 0 ||
+          info.CpuSet.LogicalProcessorIndex >= 64) {
+        continue;
+      }
+      auto& core = cores[info.CpuSet.CoreIndex];
+      core.first |= uint64_t(1) << info.CpuSet.LogicalProcessorIndex;
+      core.second = info.CpuSet.EfficiencyClass;
+      fastest = std::max(fastest, uint8_t(info.CpuSet.EfficiencyClass));
+    }
+    for (const auto& core : cores) {
+      all_cores_mask_ |= core.second.first;
+      (core.second.second == fastest ? fast_core_masks_ : slow_core_masks_)
+          .push_back(core.second.first);
+    }
+    XELOGI(
+        "split_screen: {} fast and {} slow cores, {} logical processors "
+        "(mask {:X})",
+        fast_core_masks_.size(), slow_core_masks_.size(),
+        std::bitset<64>(all_cores_mask_).count(), all_cores_mask_);
+  }
+  if (slow_core_masks_.empty() || fast_core_masks_.empty()) {
+    // All the cores are alike: Windows shares them out well enough.
+    return;
+  }
+  // Cores [begin, end) of n even shares, the share at index i.
+  auto share = [](const std::vector<uint64_t>& masks, size_t i, size_t n) {
+    uint64_t mask = 0;
+    for (size_t c = masks.size() * i / n; c < masks.size() * (i + 1) / n;
+         ++c) {
+      mask |= masks[c];
+    }
+    return mask;
+  };
+  uint64_t mask;
+  if (!on_screen) {
+    mask = share(slow_core_masks_, 0, 1);
+  } else if (count <= 1) {
+    mask = all_cores_mask_;
+  } else {
+    // Each copy on screen its own fast cores (Windows otherwise favours the
+    // focused window's threads on them), with 3 or 4 also its own slow ones.
+    mask = share(fast_core_masks_, position, count);
+    if (count >= 3 || !mask) {
+      mask |= share(slow_core_masks_, position, count);
+    }
+  }
+  if (!mask || mask == cores_mask_) {
+    return;
+  }
+  if (SetProcessAffinityMask(GetCurrentProcess(), DWORD_PTR(mask))) {
+    cores_mask_ = mask;
+    XELOGI("split_screen: runs on processors mask {:X} ({})", mask,
+           !on_screen    ? "waiting: the slow cores"
+           : count <= 1  ? "alone: all"
+                         : "its share of the fast cores");
+  } else {
+    XELOGE("split_screen: could not set processors mask {:X} ({})", mask,
+           GetLastError());
+  }
+#endif  // XE_PLATFORM_WIN32
+}
+
 void SplitScreen::LogLoad(double seconds) {
 #if XE_PLATFORM_WIN32
   // The copy's processor use, and its busiest threads (% of one processor).
@@ -561,6 +662,7 @@ void SplitScreen::Tick() {
         break;
     }
   }
+  UpdateCores(placement.visible, my_position, active_count);
   if (!placement_applied_ || !(placement == placement_)) {
     if (placement.visible && !placement_.visible && placement_applied_ &&
         me_ != 0) {

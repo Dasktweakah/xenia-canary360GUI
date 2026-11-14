@@ -71,6 +71,10 @@ class SplitScreen {
   void Relaunch();
   void LogLoad(double seconds);
   void SetFastCores(bool fast);
+  // Gives this copy its share of the processor's cores: the copies on
+  // screen the fast (performance) cores split between them, the waiting ones
+  // the slow (efficiency) cores.
+  void UpdateCores(bool on_screen, size_t position, size_t count);
   void TickPrejoin(bool join_open, std::chrono::steady_clock::time_point now);
   static std::vector<ScriptStep> ParseScript(const std::string& text);
 
@@ -105,6 +109,12 @@ class SplitScreen {
   uint64_t last_swap_count_ = 0;
   uint64_t last_process_time_ = 0;
   int fast_cores_ = -1;
+  bool cores_known_ = false;
+  // Logical processor masks of the physical cores, fast and slow.
+  std::vector<uint64_t> fast_core_masks_;
+  std::vector<uint64_t> slow_core_masks_;
+  uint64_t all_cores_mask_ = 0;
+  uint64_t cores_mask_ = 0;
   std::map<uint32_t, uint64_t> thread_times_;
   std::chrono::steady_clock::time_point last_debug_{};
   std::array<uint32_t, 16> last_debug_words_{};

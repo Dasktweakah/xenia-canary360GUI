@@ -30,6 +30,11 @@
 #if XE_PLATFORM_WIN32
 #include "xenia/base/platform_win.h"
 #include "xenia/ui/window_win.h"
+
+#include <intrin.h>
+#include <tlhelp32.h>
+#include <map>
+#include <vector>
 #endif
 
 DECLARE_bool(split_screen);
@@ -109,6 +114,12 @@ DEFINE_int32(
     "above its view in a strip (Garden Warfare: 8, its 1280x704 view placed 8 "
     "rows down); the game is told that many rows more and the strip shows from "
     "there.",
+    "Display");
+
+DEFINE_string(
+    split_screen_cpu_mask, "",
+    "Basically360, split_screen: logical processors this copy runs on, as a "
+    "hex mask (bit 0: processor 0), e.g. 0xFFFF. Empty: all.",
     "Display");
 
 DEFINE_string(
@@ -314,6 +325,104 @@ void SplitScreen::Start() {
     }
   });
   XELOGI("split_screen: this copy is player {}'s", me_ + 1);
+#if XE_PLATFORM_WIN32
+  {
+    int regs[4] = {};
+    char brand[49] = {};
+    __cpuid(regs, 0x80000000);
+    if (uint32_t(regs[0]) >= 0x80000004) {
+      for (int i = 0; i < 3; ++i) {
+        __cpuid(reinterpret_cast<int*>(brand + i * 16), 0x80000002 + i);
+      }
+    }
+    XELOGI("split_screen: processor {}, {} logical processors",
+           std::string(brand), GetActiveProcessorCount(ALL_PROCESSOR_GROUPS));
+    if (!cvars::split_screen_cpu_mask.empty()) {
+      const uint64_t mask =
+          std::strtoull(cvars::split_screen_cpu_mask.c_str(), nullptr, 16);
+      if (mask &&
+          SetProcessAffinityMask(GetCurrentProcess(), DWORD_PTR(mask))) {
+        XELOGI("split_screen: runs on processors mask {:X}", mask);
+      } else {
+        XELOGE("split_screen: could not set processors mask {} ({})",
+               cvars::split_screen_cpu_mask, GetLastError());
+      }
+    }
+  }
+#endif  // XE_PLATFORM_WIN32
+}
+
+void SplitScreen::LogLoad(double seconds) {
+#if XE_PLATFORM_WIN32
+  // The copy's processor use, and its busiest threads (% of one processor).
+  FILETIME created, exited, kernel, user;
+  auto ticks = [](const FILETIME& t) {
+    return (uint64_t(t.dwHighDateTime) << 32) | t.dwLowDateTime;
+  };
+  if (!GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel,
+                       &user)) {
+    return;
+  }
+  const uint64_t process_total = ticks(kernel) + ticks(user);
+  std::vector<std::pair<double, std::string>> busy;
+  HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+  if (snapshot != INVALID_HANDLE_VALUE) {
+    THREADENTRY32 entry;
+    entry.dwSize = sizeof(entry);
+    const DWORD pid = GetCurrentProcessId();
+    std::map<uint32_t, uint64_t> now_times;
+    for (BOOL more = Thread32First(snapshot, &entry); more;
+         more = Thread32Next(snapshot, &entry)) {
+      if (entry.th32OwnerProcessID != pid) {
+        continue;
+      }
+      HANDLE thread = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE,
+                                 entry.th32ThreadID);
+      if (!thread) {
+        continue;
+      }
+      if (GetThreadTimes(thread, &created, &exited, &kernel, &user)) {
+        const uint64_t total = ticks(kernel) + ticks(user);
+        now_times[entry.th32ThreadID] = total;
+        auto last = thread_times_.find(entry.th32ThreadID);
+        if (last != thread_times_.end() && seconds > 0.0) {
+          const double percent =
+              double(total - last->second) / (seconds * 1.0e7) * 100.0;
+          std::string name;
+          PWSTR description = nullptr;
+          if (SUCCEEDED(GetThreadDescription(thread, &description)) &&
+              description) {
+            for (const wchar_t* c = description; *c; ++c) {
+              name.push_back(*c < 128 ? char(*c) : '?');
+            }
+            LocalFree(description);
+          }
+          if (name.empty()) {
+            name = fmt::format("{}", entry.th32ThreadID);
+          }
+          busy.emplace_back(percent, name);
+        }
+      }
+      CloseHandle(thread);
+    }
+    CloseHandle(snapshot);
+    thread_times_ = std::move(now_times);
+  }
+  std::sort(busy.begin(), busy.end(),
+            [](const auto& a, const auto& b) { return a.first > b.first; });
+  std::string top;
+  for (size_t i = 0; i < busy.size() && i < 6; ++i) {
+    top += fmt::format("{}{} {:.0f}%", i ? ", " : "", busy[i].second,
+                       busy[i].first);
+  }
+  const double cores =
+      last_process_time_ && seconds > 0.0
+          ? double(process_total - last_process_time_) / (seconds * 1.0e7)
+          : 0.0;
+  last_process_time_ = process_total;
+  XELOGI("split_screen: load {:.1f} processors; busiest threads: {}", cores,
+         top);
+#endif  // XE_PLATFORM_WIN32
 }
 
 void SplitScreen::RequestTestJoin() {
@@ -506,6 +615,7 @@ void SplitScreen::Tick() {
     last_swap_count_ = swaps;
     last_swap_time_ = now;
     XELOGI("split_screen: {:.1f} frames a second", fps);
+    LogLoad(seconds);
     XELOGI(
         "split_screen: title open {}, strip {} ({}), join flag {} ({}), "
         "players on screen {}",

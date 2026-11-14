@@ -14,6 +14,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -68,6 +69,7 @@ class SplitScreen {
   void SetSlowed(int32_t frames_per_second, bool idle);
   bool ReadGuestInMatch();
   void Relaunch();
+  void LogLoad(double seconds);
   void TickPrejoin(bool join_open, std::chrono::steady_clock::time_point now);
   static std::vector<ScriptStep> ParseScript(const std::string& text);
 
@@ -100,6 +102,8 @@ class SplitScreen {
   std::chrono::steady_clock::time_point last_diagnostic_;
   std::chrono::steady_clock::time_point last_swap_time_{};
   uint64_t last_swap_count_ = 0;
+  uint64_t last_process_time_ = 0;
+  std::map<uint32_t, uint64_t> thread_times_;
   std::chrono::steady_clock::time_point last_debug_{};
   std::array<uint32_t, 16> last_debug_words_{};
 

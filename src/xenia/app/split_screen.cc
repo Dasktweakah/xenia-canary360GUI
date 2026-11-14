@@ -335,6 +335,7 @@ void SplitScreen::Start() {
         __cpuid(reinterpret_cast<int*>(brand + i * 16), 0x80000002 + i);
       }
     }
+    SetFastCores(me_ == 0);
     XELOGI("split_screen: processor {}, {} logical processors",
            std::string(brand), GetActiveProcessorCount(ALL_PROCESSOR_GROUPS));
     if (!cvars::split_screen_cpu_mask.empty()) {
@@ -348,6 +349,26 @@ void SplitScreen::Start() {
                cvars::split_screen_cpu_mask, GetLastError());
       }
     }
+  }
+#endif  // XE_PLATFORM_WIN32
+}
+
+void SplitScreen::SetFastCores(bool fast) {
+#if XE_PLATFORM_WIN32
+  // Windows 11 on hybrid processors moves the threads of programs in the
+  // background (not focused) to the slower cores ("EcoQoS"): a copy on screen
+  // asks never to be slowed so, focused or not; a waiting copy asks to be, to
+  // leave the fast cores to the players.
+  PROCESS_POWER_THROTTLING_STATE state = {};
+  state.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+  state.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
+  state.StateMask = fast ? 0 : PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
+  if (fast_cores_ != int(fast) &&
+      SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &state,
+                            sizeof(state))) {
+    fast_cores_ = int(fast);
+    XELOGI("split_screen: this copy {}",
+           fast ? "keeps the fast cores" : "may be put on slow cores");
   }
 #endif  // XE_PLATFORM_WIN32
 }
@@ -555,6 +576,7 @@ void SplitScreen::Tick() {
         script_button_down_ = false;
       }
       joined_seen_ = true;
+      SetFastCores(true);
     }
     ApplyPlacement(placement);
   }
@@ -755,6 +777,7 @@ void SplitScreen::SetSlowed(int32_t frames_per_second, bool idle) {
     SetPriorityClass(GetCurrentProcess(),
                      idle ? IDLE_PRIORITY_CLASS : BELOW_NORMAL_PRIORITY_CLASS);
     paused_by_us_ = true;
+    SetFastCores(false);
   } else if (paused_by_us_) {
     gpu::GraphicsSystem::slow_vblank_hz.store(0);
     if (normal_priority_) {

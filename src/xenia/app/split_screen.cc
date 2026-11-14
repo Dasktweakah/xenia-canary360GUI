@@ -464,9 +464,9 @@ void SplitScreen::UpdateCores(bool on_screen, size_t position, size_t count) {
   if (SetProcessAffinityMask(GetCurrentProcess(), DWORD_PTR(mask))) {
     cores_mask_ = mask;
     XELOGI("split_screen: runs on processors mask {:X} ({})", mask,
-           !on_screen    ? "waiting: the slow cores"
-           : count <= 1  ? "alone: all"
-                         : "its share of the fast cores");
+           !on_screen   ? "waiting: the slow cores"
+           : count <= 1 ? "alone: all"
+                        : "its share of the fast cores");
   } else {
     XELOGE("split_screen: could not set processors mask {:X} ({})", mask,
            GetLastError());

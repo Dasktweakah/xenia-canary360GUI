@@ -531,6 +531,31 @@ class D3D12CommandProcessor final : public CommandProcessor {
       ID3D12Resource* buffer, uint32_t total_size,
       const std::vector<draw_util::MemExportRange>& ranges);
   void PumpMemExportReadbacks();
+
+  // d3d12_gpu_pass_timing: GPU timestamps at the start of every frame, every
+  // resolve, and around every submission, to see what parts of a frame the GPU
+  // spends its time on (a "pass" here is the work between two resolves).
+  enum class PassTimingMarker : uint8_t {
+    kFrameStart,
+    kResolve,
+    kSubmissionEnd,
+    kSubmissionStart,
+    kFrameEnd,
+  };
+  struct PassTimingPass {
+    uint32_t dest_base = 0;
+    uint32_t draws = 0;
+    uint16_t dest_pitch = 0;
+    uint16_t dest_height = 0;
+    uint8_t dest_format = 0;
+    uint8_t source = 0;
+    uint8_t command = 0;
+  };
+  void PassTimingMark(PassTimingMarker marker);
+  void PassTimingBeginFrame();
+  void PassTimingEndFrame();
+  void PassTimingResolve();
+  void PassTimingHarvest(uint32_t slot);
   void CountMemExportReadback(
       const std::vector<draw_util::MemExportRange>& ranges, uint64_t wait_us);
 
@@ -829,6 +854,29 @@ class D3D12CommandProcessor final : public CommandProcessor {
   uint64_t memexport_stat_wait_us_ = 0;
   uint64_t memexport_stat_start_ms_ = 0;
   std::unordered_map<uint32_t, uint32_t> memexport_stat_ranges_;
+  static constexpr uint32_t kPassTimingMaxMarkers = 1024;
+  ID3D12QueryHeap* pass_timing_heap_ = nullptr;
+  ID3D12Resource* pass_timing_readback_ = nullptr;
+  uint64_t pass_timing_frequency_ = 0;
+  bool pass_timing_frame_open_ = false;
+  uint32_t pass_timing_draws_ = 0;
+  struct PassTimingSlot {
+    bool recorded = false;
+    std::vector<std::pair<PassTimingMarker, uint32_t>> markers;
+    std::vector<PassTimingPass> passes;
+  };
+  PassTimingSlot pass_timing_slots_[kQueueFrames];
+  struct PassTimingStat {
+    double total_ms = 0.0;
+    uint64_t draws = 0;
+    uint64_t count = 0;
+    PassTimingPass last;
+  };
+  std::unordered_map<uint64_t, PassTimingStat> pass_timing_stats_;
+  double pass_timing_busy_ms_ = 0.0;
+  double pass_timing_idle_ms_ = 0.0;
+  uint64_t pass_timing_frames_ = 0;
+  uint64_t pass_timing_start_ms_ = 0;
   uint64_t gpu_stat_frames_ = 0;
   uint64_t gpu_stat_wait_us_ = 0;
   uint64_t gpu_stat_start_ms_ = 0;

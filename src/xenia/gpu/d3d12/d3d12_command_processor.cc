@@ -50,6 +50,12 @@ DEFINE_bool(
     "especially with several emulators sharing the GPU; for games that only "
     "need the exported data a little later.",
     "GPU");
+DEFINE_bool(
+    d3d12_gpu_pass_timing, false,
+    "Measure with GPU timestamps how long the GPU spends on each part of "
+    "a frame (the work up to each resolve) and log the costliest parts "
+    "every 10 seconds.",
+    "GPU");
 DEFINE_bool(readback_memexport_stats, false,
             "Log memory export readbacks (count, wait time, addresses) and the "
             "time spent waiting for the GPU every 10 seconds.",
@@ -1716,6 +1722,8 @@ void D3D12CommandProcessor::ShutdownContext() {
     ui::d3d12::util::ReleaseAndNull(free_buffer.first);
   }
   memexport_readback_buffers_free_.clear();
+  ui::d3d12::util::ReleaseAndNull(pass_timing_heap_);
+  ui::d3d12::util::ReleaseAndNull(pass_timing_readback_);
 
   ShutdownQueryResources();
   host_query_pool_.reset();
@@ -2671,6 +2679,7 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
 
   ID3D12Device* device = GetD3D12Provider().GetDevice();
   const RegisterFile& regs = *register_file_;
+  ++pass_timing_draws_;
 
   // VIZ survey geometry associated with a specific 0:63 ID.
   // draw_util keeps it normalized, so it only counts coverage here.
@@ -3406,14 +3415,19 @@ bool D3D12CommandProcessor::IssueCopy() {
     return false;
   }
   ReadbackResolveMode readback_mode = GetReadbackResolveMode();
+  bool result;
   if (readback_mode == ReadbackResolveMode::kDisabled) {
     uint32_t written_address, written_length;
-    return render_target_cache_->Resolve(*memory_, *shared_memory_,
-                                         *texture_cache_, written_address,
-                                         written_length);
+    result = render_target_cache_->Resolve(*memory_, *shared_memory_,
+                                           *texture_cache_, written_address,
+                                           written_length);
   } else {
-    return IssueCopy_ReadbackResolvePath();
+    result = IssueCopy_ReadbackResolvePath();
   }
+  if (cvars::d3d12_gpu_pass_timing) {
+    PassTimingResolve();
+  }
+  return result;
 }
 XE_NOINLINE
 bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
@@ -3891,6 +3905,10 @@ bool D3D12CommandProcessor::BeginSubmission(bool is_guest_command) {
     // Resume the active query segment.
     OpenQuerySegment(false);
 
+    if (cvars::d3d12_gpu_pass_timing && !is_opening_frame) {
+      PassTimingMark(PassTimingMarker::kSubmissionStart);
+    }
+
     // Reset cached state of the command list.
     ff_viewport_update_needed_ = true;
     ff_scissor_update_needed_ = true;
@@ -3994,6 +4012,10 @@ bool D3D12CommandProcessor::BeginSubmission(bool is_guest_command) {
     primitive_processor_->BeginFrame();
 
     texture_cache_->BeginFrame();
+
+    if (cvars::d3d12_gpu_pass_timing) {
+      PassTimingBeginFrame();
+    }
   }
 
   return true;
@@ -4030,6 +4052,14 @@ bool D3D12CommandProcessor::EndSubmission(bool is_swap) {
 
   if (submission_open_) {
     assert_false(scratch_buffer_used_);
+
+    if (cvars::d3d12_gpu_pass_timing) {
+      if (is_closing_frame) {
+        PassTimingEndFrame();
+      } else {
+        PassTimingMark(PassTimingMarker::kSubmissionEnd);
+      }
+    }
 
     // We can't close the command list with an active query - D3D12 requirement.
     // Close the active segment and emit ResolveQueryData before executing.
@@ -5897,6 +5927,210 @@ bool D3D12CommandProcessor::UpdateBindings_BindfulPath(
   }
   retflag = false;
   return {};
+}
+
+void D3D12CommandProcessor::PassTimingMark(PassTimingMarker marker) {
+  if (!pass_timing_frame_open_ || !pass_timing_heap_) {
+    return;
+  }
+  PassTimingSlot& slot = pass_timing_slots_[frame_current_ % kQueueFrames];
+  // The last one is kept for the end of the frame.
+  if (slot.markers.size() + (marker == PassTimingMarker::kFrameEnd ? 0 : 1) >=
+      kPassTimingMaxMarkers) {
+    return;
+  }
+  const uint32_t index =
+      uint32_t(frame_current_ % kQueueFrames) * kPassTimingMaxMarkers +
+      uint32_t(slot.markers.size());
+  deferred_command_list_.D3DEndQuery(pass_timing_heap_,
+                                     D3D12_QUERY_TYPE_TIMESTAMP, index);
+  slot.markers.emplace_back(marker, uint32_t(slot.passes.size()));
+}
+
+void D3D12CommandProcessor::PassTimingBeginFrame() {
+  if (!pass_timing_heap_) {
+    const ui::d3d12::D3D12Provider& provider = GetD3D12Provider();
+    ID3D12Device* device = provider.GetDevice();
+    D3D12_QUERY_HEAP_DESC heap_desc = {};
+    heap_desc.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+    heap_desc.Count = kPassTimingMaxMarkers * kQueueFrames;
+    D3D12_RESOURCE_DESC buffer_desc;
+    ui::d3d12::util::FillBufferResourceDesc(
+        buffer_desc, sizeof(uint64_t) * kPassTimingMaxMarkers * kQueueFrames,
+        D3D12_RESOURCE_FLAG_NONE);
+    if (FAILED(provider.GetDirectQueue()->GetTimestampFrequency(
+            &pass_timing_frequency_)) ||
+        !pass_timing_frequency_ ||
+        FAILED(device->CreateQueryHeap(&heap_desc,
+                                       IID_PPV_ARGS(&pass_timing_heap_))) ||
+        FAILED(device->CreateCommittedResource(
+            &ui::d3d12::util::kHeapPropertiesReadback,
+            provider.GetHeapFlagCreateNotZeroed(), &buffer_desc,
+            D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+            IID_PPV_ARGS(&pass_timing_readback_)))) {
+      XELOGE("GPU pass timing: could not create the timestamp queries");
+      ui::d3d12::util::ReleaseAndNull(pass_timing_heap_);
+      return;
+    }
+  }
+  // This slot's previous frame is done (awaited when opening this frame).
+  const uint32_t slot_index = uint32_t(frame_current_ % kQueueFrames);
+  PassTimingHarvest(slot_index);
+  PassTimingSlot& slot = pass_timing_slots_[slot_index];
+  slot.recorded = false;
+  slot.markers.clear();
+  slot.passes.clear();
+  pass_timing_draws_ = 0;
+  pass_timing_frame_open_ = true;
+  PassTimingMark(PassTimingMarker::kFrameStart);
+}
+
+void D3D12CommandProcessor::PassTimingResolve() {
+  if (!pass_timing_frame_open_) {
+    return;
+  }
+  const RegisterFile& regs = *register_file_;
+  PassTimingSlot& slot = pass_timing_slots_[frame_current_ % kQueueFrames];
+  PassTimingPass pass;
+  pass.dest_base = regs[XE_GPU_REG_RB_COPY_DEST_BASE];
+  pass.draws = pass_timing_draws_;
+  auto copy_dest_pitch = regs.Get<reg::RB_COPY_DEST_PITCH>();
+  pass.dest_pitch = uint16_t(copy_dest_pitch.copy_dest_pitch);
+  pass.dest_height = uint16_t(copy_dest_pitch.copy_dest_height);
+  pass.dest_format =
+      uint8_t(regs.Get<reg::RB_COPY_DEST_INFO>().copy_dest_format);
+  auto copy_control = regs.Get<reg::RB_COPY_CONTROL>();
+  pass.source = uint8_t(copy_control.copy_src_select);
+  pass.command = uint8_t(copy_control.copy_command);
+  PassTimingMark(PassTimingMarker::kResolve);
+  slot.passes.push_back(pass);
+  pass_timing_draws_ = 0;
+}
+
+void D3D12CommandProcessor::PassTimingEndFrame() {
+  if (!pass_timing_frame_open_) {
+    return;
+  }
+  const uint32_t slot_index = uint32_t(frame_current_ % kQueueFrames);
+  PassTimingSlot& slot = pass_timing_slots_[slot_index];
+  // The work after the last resolve, up to the swap.
+  PassTimingPass last;
+  last.dest_base = UINT32_MAX;
+  last.draws = pass_timing_draws_;
+  PassTimingMark(PassTimingMarker::kFrameEnd);
+  slot.passes.push_back(last);
+  deferred_command_list_.D3DResolveQueryData(
+      pass_timing_heap_, D3D12_QUERY_TYPE_TIMESTAMP,
+      slot_index * kPassTimingMaxMarkers, UINT(slot.markers.size()),
+      pass_timing_readback_,
+      sizeof(uint64_t) * slot_index * kPassTimingMaxMarkers);
+  slot.recorded = true;
+  pass_timing_frame_open_ = false;
+}
+
+void D3D12CommandProcessor::PassTimingHarvest(uint32_t slot_index) {
+  PassTimingSlot& slot = pass_timing_slots_[slot_index];
+  if (!slot.recorded || slot.markers.size() < 2 || !pass_timing_readback_) {
+    return;
+  }
+  slot.recorded = false;
+  D3D12_RANGE read_range;
+  read_range.Begin = sizeof(uint64_t) * slot_index * kPassTimingMaxMarkers;
+  read_range.End = read_range.Begin + sizeof(uint64_t) * slot.markers.size();
+  void* mapping;
+  if (FAILED(pass_timing_readback_->Map(0, &read_range, &mapping))) {
+    return;
+  }
+  const uint64_t* timestamps = reinterpret_cast<const uint64_t*>(
+      reinterpret_cast<const uint8_t*>(mapping) + read_range.Begin);
+  const double ms_per_tick = 1000.0 / double(pass_timing_frequency_);
+  std::vector<double> pass_ms(slot.passes.size(), 0.0);
+  for (size_t i = 1; i < slot.markers.size(); ++i) {
+    const double delta_ms =
+        timestamps[i] >= timestamps[i - 1]
+            ? double(timestamps[i] - timestamps[i - 1]) * ms_per_tick
+            : 0.0;
+    if (slot.markers[i - 1].first == PassTimingMarker::kSubmissionEnd &&
+        slot.markers[i].first == PassTimingMarker::kSubmissionStart) {
+      // The GPU waiting for the next submission.
+      pass_timing_idle_ms_ += delta_ms;
+      continue;
+    }
+    pass_timing_busy_ms_ += delta_ms;
+    const uint32_t pass_index = slot.markers[i].second;
+    if (pass_index < pass_ms.size()) {
+      pass_ms[pass_index] += delta_ms;
+    }
+  }
+  D3D12_RANGE write_range = {};
+  pass_timing_readback_->Unmap(0, &write_range);
+  ++pass_timing_frames_;
+  // Passes are told apart by where they resolve to (and how), and by their
+  // order among the passes resolving to the same place in the frame.
+  std::unordered_map<uint64_t, uint32_t> occurrences;
+  for (size_t i = 0; i < slot.passes.size(); ++i) {
+    const PassTimingPass& pass = slot.passes[i];
+    uint64_t key = (uint64_t(pass.dest_base) << 16) ^
+                   (uint64_t(pass.source) << 8) ^ uint64_t(pass.dest_format);
+    key ^= uint64_t(occurrences[key]++) << 56;
+    PassTimingStat& stat = pass_timing_stats_[key];
+    stat.total_ms += pass_ms[i];
+    stat.draws += pass.draws;
+    ++stat.count;
+    stat.last = pass;
+  }
+  const uint64_t now_ms = Clock::QueryHostUptimeMillis();
+  if (!pass_timing_start_ms_) {
+    pass_timing_start_ms_ = now_ms;
+    return;
+  }
+  if (now_ms - pass_timing_start_ms_ < 10000 || !pass_timing_frames_) {
+    return;
+  }
+  const double frames = double(pass_timing_frames_);
+  std::vector<std::pair<double, const PassTimingStat*>> sorted;
+  sorted.reserve(pass_timing_stats_.size());
+  for (const auto& stat : pass_timing_stats_) {
+    sorted.emplace_back(stat.second.total_ms, &stat.second);
+  }
+  std::sort(sorted.begin(), sorted.end(),
+            [](const auto& a, const auto& b) { return a.first > b.first; });
+  uint64_t resolves = 0;
+  for (const auto& stat : pass_timing_stats_) {
+    if (stat.second.last.dest_base != UINT32_MAX) {
+      resolves += stat.second.count;
+    }
+  }
+  XELOGI(
+      "GPU pass timing: {:.0f} frames, GPU busy {:.2f} ms a frame, idle "
+      "between submissions {:.2f} ms a frame, {:.1f} resolves a frame",
+      frames, pass_timing_busy_ms_ / frames, pass_timing_idle_ms_ / frames,
+      double(resolves) / frames);
+  static const char* const kCommands[] = {"raw", "convert", "constant", "null"};
+  for (size_t i = 0; i < std::min(sorted.size(), size_t(24)); ++i) {
+    const PassTimingStat& stat = *sorted[i].second;
+    const PassTimingPass& pass = stat.last;
+    if (pass.dest_base == UINT32_MAX) {
+      XELOGI("  {:5.2f} ms ({:4.1f}%)  after the last resolve, {:.0f} draws",
+             stat.total_ms / frames,
+             stat.total_ms / pass_timing_busy_ms_ * 100.0,
+             double(stat.draws) / double(stat.count));
+      continue;
+    }
+    XELOGI(
+        "  {:5.2f} ms ({:4.1f}%)  {:.0f} draws, resolve {} {} to {:08X} "
+        "{}x{} format {}, {:.2f} times a frame",
+        stat.total_ms / frames, stat.total_ms / pass_timing_busy_ms_ * 100.0,
+        double(stat.draws) / double(stat.count),
+        pass.source == 4 ? "depth" : fmt::format("color{}", pass.source),
+        kCommands[pass.command & 3], pass.dest_base, pass.dest_pitch,
+        pass.dest_height, pass.dest_format, double(stat.count) / frames);
+  }
+  pass_timing_stats_.clear();
+  pass_timing_busy_ms_ = 0.0;
+  pass_timing_idle_ms_ = 0.0;
+  pass_timing_frames_ = 0;
+  pass_timing_start_ms_ = now_ms;
 }
 
 ID3D12Resource* D3D12CommandProcessor::AcquireMemExportReadbackBuffer(

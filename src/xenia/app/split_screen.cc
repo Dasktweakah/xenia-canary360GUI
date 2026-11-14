@@ -89,10 +89,23 @@ DEFINE_int32(
     "waiting copy may go into player 1's match (its title screen up).",
     "Display");
 DEFINE_int32(
-    split_screen_prejoin_fps, 10,
+    split_screen_prejoin_settle, 75,
+    "Basically360, split_screen_prejoin: seconds the game patch must say a "
+    "match is drawn (it does while the level still loads) before a waiting "
+    "copy counts as at the character select screen and is slowed.",
+    "Display");
+DEFINE_int32(
+    split_screen_prejoin_fps, 15,
     "Basically360, split_screen_prejoin: frames a second a copy waiting at "
     "the character select screen runs at until its player joins (0: full "
     "speed).",
+    "Display");
+
+DEFINE_int32(
+    split_screen_strip_view_top, 8,
+    "Basically360, split_screen: rows of its picture a game (patched) leaves "
+    "above its view while a match is drawn in a strip (Garden Warfare: 8, its "
+    "1280x704 view placed 8 rows down); the strip shows from there.",
     "Display");
 
 DEFINE_string(
@@ -449,10 +462,18 @@ void SplitScreen::Tick() {
       rows = StripRows(next_rect);
     }
   }
-  if (rows != strip_rows_) {
+  // While a match is drawn the game puts its view a few rows down (Garden
+  // Warfare: 8): the strip shows from there, without a black line on top.
+  const uint32_t top =
+      rows && ReadGuestInMatch()
+          ? uint32_t(std::min(std::max(cvars::split_screen_strip_view_top, 0),
+                              int32_t(720 - rows)))
+          : 0;
+  if (rows != strip_rows_ || top != strip_top_) {
     strip_rows_ = rows;
+    strip_top_ = top;
     if (rows) {
-      ui::Presenter::SetCropOverride(0.0f, 0.0f, 100.0f,
+      ui::Presenter::SetCropOverride(0.0f, float(top) * 100.0f / 720.0f, 100.0f,
                                      float(rows) * 100.0f / 720.0f);
     }
   }
@@ -598,6 +619,24 @@ bool SplitScreen::ReadGuestInMatch() {
 
 void SplitScreen::TickPrejoin(bool join_open,
                               std::chrono::steady_clock::time_point now) {
+  // Player 1's match has ended (no joining for a while) after this copy went
+  // into it: start this copy again, to go into player 1's next match from the
+  // title screen.
+  if (prejoin_started_) {
+    if (join_open) {
+      join_closed_seen_ = false;
+    } else if (!join_closed_seen_) {
+      join_closed_seen_ = true;
+      join_closed_time_ = now;
+    } else if (now - join_closed_time_ >= std::chrono::seconds(5)) {
+      XELOGI(
+          "split_screen: player 1's match has ended; player {}'s copy starts "
+          "again for the next one",
+          me_ + 1);
+      Relaunch();
+      return;
+    }
+  }
   if (!prejoin_started_) {
     // Waiting at the title screen until player 1's match lets players join.
     if (join_open && emulator_->is_title_open() && !script_.empty() &&
@@ -640,8 +679,11 @@ void SplitScreen::TickPrejoin(bool join_open,
   } else {
     in_match_seen_ = false;
   }
-  if ((in_match_seen_ && now - in_match_time_ >= std::chrono::seconds(15)) ||
-      now - prejoin_time_ >= std::chrono::seconds(120)) {
+  if ((in_match_seen_ &&
+       now - in_match_time_ >=
+           std::chrono::seconds(
+               std::max(cvars::split_screen_prejoin_settle, int32_t(0)))) ||
+      now - prejoin_time_ >= std::chrono::seconds(180)) {
     prejoin_ready_ = true;
     XELOGI(
         "split_screen: player {}'s copy waits at the character select screen "
@@ -655,6 +697,33 @@ void SplitScreen::TickPrejoin(bool join_open,
   }
 }
 
+void SplitScreen::Relaunch() {
+#if XE_PLATFORM_WIN32
+  if (relaunched_) {
+    return;
+  }
+  relaunched_ = true;
+  std::wstring command_line = GetCommandLineW();
+  wchar_t directory[MAX_PATH] = {};
+  GetCurrentDirectoryW(MAX_PATH, directory);
+  STARTUPINFOW startup_info = {};
+  startup_info.cb = sizeof(startup_info);
+  PROCESS_INFORMATION process_info = {};
+  if (!CreateProcessW(nullptr, command_line.data(), nullptr, nullptr, FALSE,
+                      normal_priority_ ? normal_priority_ : 0, nullptr,
+                      directory, &startup_info, &process_info)) {
+    XELOGE("split_screen: could not start this copy again ({})",
+           GetLastError());
+    relaunched_ = false;
+    return;
+  }
+  CloseHandle(process_info.hThread);
+  CloseHandle(process_info.hProcess);
+  // The new copy takes this player's place in the table; this one goes.
+  TerminateProcess(GetCurrentProcess(), 0);
+#endif  // XE_PLATFORM_WIN32
+}
+
 void SplitScreen::ApplyPlacement(const Placement& placement) {
   placement_ = placement;
   placement_applied_ = true;
@@ -664,6 +733,7 @@ void SplitScreen::ApplyPlacement(const Placement& placement) {
 #endif  // XE_PLATFORM_WIN32
   float crop[4] = {};
   strip_rows_ = 0;
+  strip_top_ = 0;
   // With a strip address the crop follows the rows the game draws (Tick).
   if (placement.strip && !ParseAddress(cvars::split_screen_strip_address)) {
     const char* text = cvars::split_screen_strip_crop.c_str();

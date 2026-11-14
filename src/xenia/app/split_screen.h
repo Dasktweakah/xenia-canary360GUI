@@ -67,6 +67,7 @@ class SplitScreen {
   uint32_t StripRows(const float rect[4]);
   void SetSlowed(int32_t frames_per_second, bool idle);
   bool ReadGuestInMatch();
+  void Relaunch();
   void TickPrejoin(bool join_open, std::chrono::steady_clock::time_point now);
   static std::vector<ScriptStep> ParseScript(const std::string& text);
 
@@ -90,6 +91,7 @@ class SplitScreen {
   std::chrono::steady_clock::time_point start_time_;
   bool paused_by_us_ = false;
   uint32_t strip_rows_ = 0;
+  uint32_t strip_top_ = 0;
   unsigned long normal_priority_ = 0;
   bool joined_seen_ = false;
   bool join_open_logged_ = false;
@@ -110,6 +112,9 @@ class SplitScreen {
   bool prejoin_ready_ = false;
   std::chrono::steady_clock::time_point prejoin_time_;
   bool in_match_seen_ = false;
+  bool join_closed_seen_ = false;
+  std::chrono::steady_clock::time_point join_closed_time_;
+  bool relaunched_ = false;
   std::chrono::steady_clock::time_point in_match_time_;
 };
 

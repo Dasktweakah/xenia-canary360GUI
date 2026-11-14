@@ -75,6 +75,7 @@ class SplitScreen {
   // screen the fast (performance) cores split between them, the waiting ones
   // the slow (efficiency) cores.
   void UpdateCores(bool on_screen, size_t position, size_t count);
+  void PinBusyThreads();
   void TickPrejoin(bool join_open, std::chrono::steady_clock::time_point now);
   static std::vector<ScriptStep> ParseScript(const std::string& text);
 
@@ -115,6 +116,9 @@ class SplitScreen {
   std::vector<uint64_t> slow_core_masks_;
   uint64_t all_cores_mask_ = 0;
   uint64_t cores_mask_ = 0;
+  uint64_t pin_mask_ = 0;
+  std::vector<uint32_t> busy_threads_;
+  std::vector<uint32_t> pinned_threads_;
   std::map<uint32_t, uint64_t> thread_times_;
   std::chrono::steady_clock::time_point last_debug_{};
   std::array<uint32_t, 16> last_debug_words_{};

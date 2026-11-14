@@ -456,11 +456,18 @@ void SplitScreen::UpdateCores(bool on_screen, size_t position, size_t count) {
       mask |= share(slow_core_masks_, position, count);
     }
   }
-  if (!mask || mask == cores_mask_) {
+  // With 3 or 4 on screen a copy's own fast cores are few: its busiest
+  // threads (the game's main thread and job thread) are kept on them, as
+  // Windows would put an unfocused window's threads on the slow ones.
+  const uint64_t pin_mask =
+      on_screen && count >= 3 ? share(fast_core_masks_, position, count) : 0;
+  if (!mask || (mask == cores_mask_ && pin_mask == pin_mask_)) {
     return;
   }
+  pin_mask_ = pin_mask;
   if (SetProcessAffinityMask(GetCurrentProcess(), DWORD_PTR(mask))) {
     cores_mask_ = mask;
+    PinBusyThreads();
     XELOGI("split_screen: runs on processors mask {:X} ({})", mask,
            !on_screen   ? "waiting: the slow cores"
            : count <= 1 ? "alone: all"
@@ -469,6 +476,46 @@ void SplitScreen::UpdateCores(bool on_screen, size_t position, size_t count) {
     XELOGE("split_screen: could not set processors mask {:X} ({})", mask,
            GetLastError());
   }
+#endif  // XE_PLATFORM_WIN32
+}
+
+void SplitScreen::PinBusyThreads() {
+#if XE_PLATFORM_WIN32
+  // Busy threads on pin_mask_ (when set), the others back on the process'
+  // processors.
+  std::vector<uint32_t> pinned;
+  for (uint32_t id : busy_threads_) {
+    if (!pin_mask_) {
+      break;
+    }
+    HANDLE thread = OpenThread(
+        THREAD_SET_LIMITED_INFORMATION | THREAD_QUERY_LIMITED_INFORMATION,
+        FALSE, id);
+    if (thread) {
+      if (SetThreadAffinityMask(thread, DWORD_PTR(pin_mask_))) {
+        pinned.push_back(id);
+      }
+      CloseHandle(thread);
+    }
+  }
+  for (uint32_t id : pinned_threads_) {
+    if (std::find(pinned.begin(), pinned.end(), id) != pinned.end()) {
+      continue;
+    }
+    HANDLE thread = OpenThread(
+        THREAD_SET_LIMITED_INFORMATION | THREAD_QUERY_LIMITED_INFORMATION,
+        FALSE, id);
+    if (thread) {
+      SetThreadAffinityMask(
+          thread, DWORD_PTR(cores_mask_ ? cores_mask_ : all_cores_mask_));
+      CloseHandle(thread);
+    }
+  }
+  if (pinned != pinned_threads_ && !pinned.empty()) {
+    XELOGI("split_screen: {} busy threads kept on processors mask {:X}",
+           pinned.size(), pin_mask_);
+  }
+  pinned_threads_ = std::move(pinned);
 #endif  // XE_PLATFORM_WIN32
 }
 
@@ -485,6 +532,7 @@ void SplitScreen::LogLoad(double seconds) {
   }
   const uint64_t process_total = ticks(kernel) + ticks(user);
   std::vector<std::pair<double, std::string>> busy;
+  std::vector<uint32_t> busy_now;
   HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
   if (snapshot != INVALID_HANDLE_VALUE) {
     THREADENTRY32 entry;
@@ -521,12 +569,19 @@ void SplitScreen::LogLoad(double seconds) {
             name = fmt::format("{}", entry.th32ThreadID);
           }
           busy.emplace_back(percent, name);
+          if (percent >= 40.0) {
+            busy_now.push_back(entry.th32ThreadID);
+          }
         }
       }
       CloseHandle(thread);
     }
     CloseHandle(snapshot);
     thread_times_ = std::move(now_times);
+    if (seconds > 0.0) {
+      busy_threads_ = std::move(busy_now);
+      PinBusyThreads();
+    }
   }
   std::sort(busy.begin(), busy.end(),
             [](const auto& a, const auto& b) { return a.first > b.first; });

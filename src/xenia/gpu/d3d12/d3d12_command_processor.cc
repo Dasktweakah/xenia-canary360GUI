@@ -3442,6 +3442,11 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
   if (!written_length) {
     return true;
   }
+  if (cvars::readback_resolve_max_bytes &&
+      written_length > cvars::readback_resolve_max_bytes) {
+    ++gpu_stat_resolve_skipped_;
+    return true;
+  }
 
   // Skip all the GPU readback work if the destination memory isn't writable.
   VirtualHeap* physical_heap = memory_->GetPhysicalHeap();
@@ -3861,15 +3866,18 @@ bool D3D12CommandProcessor::BeginSubmission(bool is_guest_command) {
       const double seconds = (now_ms - gpu_stat_start_ms_) / 1000.0;
       XELOGI(
           "GPU: {:.1f} frames a second, waiting {:.0f} ms a second for the GPU "
-          "to finish older frames; resolve readbacks ({}) {:.1f} a second, "
-          "{:.1f} of them waited for, {:.0f} ms a second waiting",
+          "to finish older frames; resolve readbacks ({}) {:.1f} a second "
+          "({:.1f} skipped as too large), {:.1f} of them waited for, {:.0f} ms "
+          "a second waiting",
           gpu_stat_frames_ / seconds, gpu_stat_wait_us_ / 1000.0 / seconds,
           cvars::readback_resolve, gpu_stat_resolve_readbacks_ / seconds,
+          gpu_stat_resolve_skipped_ / seconds,
           gpu_stat_resolve_waits_ / seconds,
           gpu_stat_resolve_wait_us_ / 1000.0 / seconds);
       gpu_stat_frames_ = 0;
       gpu_stat_wait_us_ = 0;
       gpu_stat_resolve_readbacks_ = 0;
+      gpu_stat_resolve_skipped_ = 0;
       gpu_stat_resolve_waits_ = 0;
       gpu_stat_resolve_wait_us_ = 0;
       gpu_stat_start_ms_ = now_ms;

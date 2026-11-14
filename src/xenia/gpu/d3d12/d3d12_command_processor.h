@@ -881,6 +881,7 @@ class D3D12CommandProcessor final : public CommandProcessor {
   uint64_t gpu_stat_wait_us_ = 0;
   uint64_t gpu_stat_start_ms_ = 0;
   uint64_t gpu_stat_resolve_readbacks_ = 0;
+  uint64_t gpu_stat_resolve_skipped_ = 0;
   uint64_t gpu_stat_resolve_waits_ = 0;
   uint64_t gpu_stat_resolve_wait_us_ = 0;
 

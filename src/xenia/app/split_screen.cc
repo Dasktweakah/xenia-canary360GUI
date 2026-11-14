@@ -76,8 +76,9 @@ DEFINE_string(
 
 DEFINE_bool(
     split_screen_prejoin, false,
-    "Basically360, split_screen: a copy waiting for its player goes into "
-    "player 1's match ahead of time, hidden (with split_screen_join_script, "
+    "Basically360, split_screen: the next player's copy (the lowest numbered "
+    "one still waiting) goes into player 1's match ahead of time, hidden (with "
+    "split_screen_join_script, "
     "once player 1's match lets players join), drawn with the shape it gets "
     "when its player joins, and waits at the character select screen; a "
     "player who joins is then there at once, like on the Xbox One. The "
@@ -543,7 +544,16 @@ void SplitScreen::Tick() {
   // can leave a lock taken that the UI thread then waits for forever.)
   if (!placement.visible) {
     if (cvars::split_screen_prejoin && me_ != 0) {
-      TickPrejoin(join_open_now, now);
+      // Only the next player to join goes in ahead of time (each player
+      // waiting in player 1's match costs player 1's game frames): the copies
+      // of lower numbered players have all joined, or aren't running.
+      bool next_in_line = true;
+      for (size_t i = 1; i < me_; ++i) {
+        if (ProcessRunning(pid[i]) && !joined[i]) {
+          next_in_line = false;
+        }
+      }
+      TickPrejoin(join_open_now && (next_in_line || prejoin_started_), now);
       if (prejoin_started_) {
         return;
       }
@@ -726,7 +736,7 @@ void SplitScreen::TickPrejoin(bool join_open,
             ? fmt::format(", slowed to {} frames a second",
                           cvars::split_screen_prejoin_fps)
             : std::string());
-    SetSlowed(cvars::split_screen_prejoin_fps, false);
+    SetSlowed(cvars::split_screen_prejoin_fps, true);
   }
 }
 

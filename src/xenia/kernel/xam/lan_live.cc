@@ -20,6 +20,7 @@
 
 #include "xenia/kernel/xam/lan_live.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstring>
@@ -190,11 +191,12 @@ std::string Describe() {
   return m.str();
 }
 
-void Receive(const std::string& message) {
+// Receive: a message from another copy (false: not one).
+bool Receive(const std::string& message) {
   std::istringstream in(message);
   std::string line;
   if (!std::getline(in, line) || line != "XLAN 1") {
-    return;
+    return false;
   }
   uint64_t id = 0;
   Peer peer;
@@ -241,7 +243,7 @@ void Receive(const std::string& message) {
     }
   }
   if (!id || id == instance_id_) {
-    return;  // (our own, heard back)
+    return false;  // (our own, heard back)
   }
   peer.seen = std::chrono::steady_clock::now();
   std::lock_guard<std::mutex> lock(mutex_);
@@ -252,6 +254,7 @@ void Receive(const std::string& message) {
     XELOGI("LAN Live: found a copy ({} profile(s), title {:08X})",
            p.users.size(), p.title_id);
   }
+  return true;
 }
 
 void Run() {
@@ -345,8 +348,16 @@ void Run() {
       socklen_t from_len = sizeof(from);
       int n = recvfrom(s, buffer.data(), int(buffer.size()), 0,
                        reinterpret_cast<sockaddr*>(&from), &from_len);
-      if (n > 0) {
-        Receive(std::string(buffer.data(), size_t(n)));
+      if (n > 0 && Receive(std::string(buffer.data(), size_t(n)))) {
+        // A copy that found this one (one that started later, or a friend
+        // over Tailscale) hears back from it from now on.
+        const uint32_t sender = ntohl(from.sin_addr.s_addr);
+        if (sender && sender != own &&
+            std::find(targets.begin(), targets.end(), sender) ==
+                targets.end()) {
+          targets.push_back(sender);
+          XELOGI("LAN Live: talking to {:08X} too", sender);
+        }
       }
     }
   }

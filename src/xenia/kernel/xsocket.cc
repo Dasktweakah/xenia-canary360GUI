@@ -239,11 +239,12 @@ void XSocket::BindToInstanceAddress() {
 // from such a port on this machine (127.x.x.x) are mapped the same way, so a
 // title that talks to itself (a game's host on this console) still reaches its
 // own socket. Basically360: with xnet_online, so are those to and from the home
-// network (10.x, 172.16-31.x, 192.168.x, 169.254.x) - another PC's copy of
-// Xenia bound its ports the same way.
+// network (10.x, 172.16-31.x, 192.168.x, 169.254.x, and a Tailscale network's
+// 100.64-127.x) - another PC's copy of Xenia bound its ports the same way.
 static bool IsHomeNetworkAddress(uint32_t address) {
   return (address >> 24) == 10 || (address >> 20) == 0xAC1 ||
-         (address >> 16) == 0xC0A8 || (address >> 16) == 0xA9FE;
+         (address >> 16) == 0xC0A8 || (address >> 16) == 0xA9FE ||
+         (address & 0xFFC00000) == 0x64400000;
 }
 
 static bool IsRemappedLoopbackPort(uint32_t address, uint16_t port) {

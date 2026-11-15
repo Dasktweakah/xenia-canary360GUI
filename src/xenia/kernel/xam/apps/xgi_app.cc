@@ -10,10 +10,16 @@
 #include "xenia/kernel/xam/apps/xgi_app.h"
 #include "xenia/kernel/xsession.h"
 
+#include <algorithm>
+#include <cstring>
+
 #include <random>
 
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
+#include "xenia/kernel/kernel_state.h"
+#include "xenia/kernel/xam/lan_live.h"
+#include "xenia/kernel/xam/xam_state.h"
 
 DECLARE_bool(xnet_online);
 
@@ -251,16 +257,40 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
           // XNADDR hostAddress (36): ina, inaOnline, wPortOnline, abEnet,
           // abOnline
           uint8_t* host = info + 8;
-          std::memset(host, 0, 36);
-          host[0] = 127;
-          host[3] = 1;
-          host[4] = 127;
-          host[7] = 1;
-          host[8] = 1000 >> 8;
-          host[9] = 1000 & 0xFF;
-          std::memset(host + 10, 0xCC, 6);
+          if (lan_live::Enabled()) {
+            // LAN Live: this copy, as the other copies reach it.
+            lan_live::FillXnAddr(host, lan_live::OwnAddress());
+          } else {
+            std::memset(host, 0, 36);
+            host[0] = 127;
+            host[3] = 1;
+            host[4] = 127;
+            host[7] = 1;
+            host[8] = 1000 >> 8;
+            host[9] = 1000 & 0xFF;
+            std::memset(host + 10, 0xCC, 6);
+          }
           // XNKEY keyExchangeKey (16)
           fill_random(info + 44, 16);
+          if (lan_live::Enabled()) {
+            // Shared with the other copies, which see the host's profiles
+            // as friends in it (Minecraft's Join tab).
+            lan_live::Session hosted;
+            std::memcpy(hosted.id.data(), info, 8);
+            std::memcpy(hosted.host.data(), info + 8, 36);
+            std::memcpy(hosted.key.data(), info + 44, 16);
+            hosted.flags = flags;
+            hosted.max_public = num_slots_public;
+            hosted.max_private = num_slots_private;
+            auto xam = kernel_state_->xam_state();
+            UserProfile* user =
+                user_xuid < 4 ? xam->GetUserProfile(user_xuid) : nullptr;
+            for (uint32_t i = 0; !user && i < 4; ++i) {
+              user = xam->GetUserProfile(i);
+            }
+            hosted.host_xuid = user ? user->xuid() : 0;
+            lan_live::HostSession(session_ptr, hosted);
+          }
         }
         if ((flags & SessionFlags::HOST) && nonce_ptr) {
           fill_random(memory_->TranslateVirtual<uint8_t*>(nonce_ptr), 8);
@@ -274,6 +304,9 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
     case 0x000B0011: {
       XELOGD("XGISessionDelete({:08X}, {:08X}), implemented in netplay",
              buffer_ptr, buffer_length);
+      if (buffer_length >= 4) {
+        lan_live::EndSession(xe::load_and_swap<uint32_t>(buffer + 0x0));
+      }
       return X_STATUS_SUCCESS;
     }
     case 0x000B0012: {
@@ -288,6 +321,119 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
       XELOGD("XGISessionJoinLocal({:08X}, {}, {}, {:08X}, {:08X})", session_ptr,
              user_count, unk_0, user_index_array, private_slots_array);
       return X_E_SUCCESS;
+    }
+    case 0x000B0018: {
+      // XSessionModify(session, flags, public slots, private slots).
+      if (buffer_length >= 0x10) {
+        const uint32_t session_ptr = xe::load_and_swap<uint32_t>(buffer + 0x0);
+        const uint32_t flags = xe::load_and_swap<uint32_t>(buffer + 0x4);
+        const uint32_t max_public = xe::load_and_swap<uint32_t>(buffer + 0x8);
+        const uint32_t max_private = xe::load_and_swap<uint32_t>(buffer + 0xC);
+        XELOGI("XSessionModify({:08X}, flags {:08X}, {} public, {} private)",
+               session_ptr, flags, max_public, max_private);
+        lan_live::ModifySession(session_ptr, flags, max_public, max_private);
+      }
+      return X_E_SUCCESS;
+    }
+    case 0x000B001B:
+    case 0x000B0060: {
+      // XSessionSearchByID(user, session id, results) and
+      // XSessionSearchByIds(user, count, ids, results): Basically360
+      // (lan_live) finds the sessions hosted by the other copies on this home
+      // network; nothing else is found.
+      if (buffer_length < 0x14) {
+        return X_E_INVALIDARG;
+      }
+      std::vector<lan_live::XnKid> ids;
+      if (message == 0x000B001B) {
+        lan_live::XnKid kid;
+        std::memcpy(kid.data(), buffer + 0x4, 8);
+        ids.push_back(kid);
+      } else {
+        const uint32_t count = xe::load_and_swap<uint32_t>(buffer + 0x4);
+        const uint32_t ids_ptr = xe::load_and_swap<uint32_t>(buffer + 0x8);
+        for (uint32_t i = 0; ids_ptr && i < std::min(count, 100u); ++i) {
+          lan_live::XnKid kid;
+          std::memcpy(kid.data(), memory_->TranslateVirtual(ids_ptr + i * 8),
+                      8);
+          ids.push_back(kid);
+        }
+      }
+      uint32_t results_size = xe::load_and_swap<uint32_t>(buffer + 0xC);
+      if (results_size >= 0x10000000) {  // a pointer to it
+        results_size = xe::load_and_swap<uint32_t>(
+            memory_->TranslateVirtual(results_size));
+      }
+      const uint32_t results_ptr = xe::load_and_swap<uint32_t>(buffer + 0x10);
+      if (!results_ptr || results_size < 8) {
+        return X_E_INVALIDARG;
+      }
+      std::vector<lan_live::Session> found;
+      for (const auto& kid : ids) {
+        lan_live::Session session;
+        if (lan_live::FindSession(kid, &session)) {
+          found.push_back(session);
+        }
+      }
+      // XSESSION_SEARCHRESULT_HEADER (count, results), then the
+      // XSESSION_SEARCHRESULTs (0x5C) - each its XSESSION_INFO, open and
+      // filled slots and its contexts (after all the results).
+      constexpr uint32_t kResultSize = 0x5C;
+      uint8_t* out = memory_->TranslateVirtual(results_ptr);
+      std::memset(out, 0, results_size);
+      uint32_t fits = 0;
+      size_t contexts = 0;
+      for (const auto& session : found) {
+        const size_t need = 8 + (fits + 1) * kResultSize +
+                            (contexts + session.contexts.size()) * 8;
+        if (need > results_size) {
+          break;
+        }
+        contexts += session.contexts.size();
+        ++fits;
+      }
+      xe::store_and_swap<uint32_t>(out + 0x0, fits);
+      xe::store_and_swap<uint32_t>(out + 0x4, fits ? results_ptr + 8 : 0);
+      uint32_t context_at = 8 + fits * kResultSize;
+      for (uint32_t i = 0; i < fits; ++i) {
+        const auto& session = found[i];
+        uint8_t* r = out + 8 + i * kResultSize;
+        std::memcpy(r + 0x00, session.id.data(), 8);
+        std::memcpy(r + 0x08, session.host.data(), 36);
+        std::memcpy(r + 0x2C, session.key.data(), 16);
+        const uint32_t filled_public =
+            std::max<uint32_t>(session.filled_public, 1);
+        xe::store_and_swap<uint32_t>(r + 0x3C,
+                                     session.max_public > filled_public
+                                         ? session.max_public - filled_public
+                                         : 0);
+        xe::store_and_swap<uint32_t>(
+            r + 0x40, session.max_private > session.filled_private
+                          ? session.max_private - session.filled_private
+                          : 0);
+        xe::store_and_swap<uint32_t>(r + 0x44, filled_public);
+        xe::store_and_swap<uint32_t>(r + 0x48, session.filled_private);
+        xe::store_and_swap<uint32_t>(r + 0x4C, 0);  // properties
+        xe::store_and_swap<uint32_t>(r + 0x50,
+                                     uint32_t(session.contexts.size()));
+        xe::store_and_swap<uint32_t>(r + 0x54, 0);
+        xe::store_and_swap<uint32_t>(
+            r + 0x58, session.contexts.empty() ? 0 : results_ptr + context_at);
+        for (const auto& [context_id, value] : session.contexts) {
+          xe::store_and_swap<uint32_t>(out + context_at, context_id);
+          xe::store_and_swap<uint32_t>(out + context_at + 4, value);
+          context_at += 8;
+        }
+      }
+      XELOGI("XSessionSearchByIds({} id(s)) -> {} session(s) found", ids.size(),
+             fits);
+      return X_E_SUCCESS;
+    }
+    case 0x000B001C: {
+      // XSessionSearch (matchmaking queries): nothing on Xbox LIVE here.
+      XELOGI("XSessionSearch({:08X}, {:08X}) -> no sessions", buffer_ptr,
+             buffer_length);
+      return X_E_FAIL;
     }
     case 0x000B0014: {
       // Gets 584107FB in game.

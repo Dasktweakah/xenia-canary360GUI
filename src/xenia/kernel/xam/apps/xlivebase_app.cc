@@ -14,6 +14,8 @@
 
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
+#include "xenia/kernel/kernel_state.h"
+#include "xenia/kernel/xam/lan_live.h"
 #include "xenia/kernel/xenumerator.h"
 
 DECLARE_bool(xnet_online);
@@ -150,6 +152,38 @@ X_HRESULT XLiveBaseApp::DispatchMessageSync(uint32_t message,
       if (XFAILED(result)) {
         return X_E_FAIL;
       }
+      // Basically360 (lan_live): the profiles signed in on the other copies
+      // of Xenia on this home network, online and playing - joinable when the
+      // copy hosts a session (Minecraft's Join tab lists a friend that is
+      // ONLINE and JOINABLE, playing its own title, with a session id).
+      size_t lan_friends = 0;
+      if (lan_live::Enabled()) {
+        for (const auto& f : lan_live::Friends(0)) {
+          if (lan_friends >= friends_to_return) {
+            break;
+          }
+          uint8_t* item = e->AppendItem();
+          std::memset(item, 0, kFriendSize);
+          xe::store_and_swap<uint64_t>(item + 0x00, f.xuid);
+          std::strncpy(reinterpret_cast<char*>(item + 0x08), f.gamertag.c_str(),
+                       15);
+          uint32_t state = 0x1 | 0x2;  // ONLINE, PLAYING
+          if (f.joinable) {
+            state |= 0x10;  // JOINABLE
+            std::memcpy(item + 0x1C, f.session_id.data(), 8);
+          }
+          xe::store_and_swap<uint32_t>(item + 0x18, state);
+          xe::store_and_swap<uint32_t>(item + 0x24, f.title_id);
+          const char* presence = f.joinable ? "Playing a game" : "Online";
+          size_t n = std::strlen(presence);
+          xe::store_and_swap<uint32_t>(item + 0x40, uint32_t(n));
+          for (size_t i = 0; i < n; ++i) {
+            xe::store_and_swap<uint16_t>(item + 0x44 + i * 2,
+                                         uint16_t(presence[i]));
+          }
+          ++lan_friends;
+        }
+      }
       if (buffer_size_ptr) {
         xe::store_and_swap<uint32_t>(memory_->TranslateVirtual(buffer_size_ptr),
                                      kFriendSize * friends_to_return);
@@ -159,9 +193,10 @@ X_HRESULT XLiveBaseApp::DispatchMessageSync(uint32_t message,
                                      e->handle());
       }
       XELOGD(
-          "XFriendsCreateEnumerator(user {}, start {}, count {}) -> empty "
-          "list, handle {:08X}",
-          user_index, starting_index, friends_to_return, e->handle());
+          "XFriendsCreateEnumerator(user {}, start {}, count {}) -> {} "
+          "friend(s), handle {:08X}",
+          user_index, starting_index, friends_to_return, lan_friends,
+          e->handle());
       return X_E_SUCCESS;
     }
     case 0x00058023: {

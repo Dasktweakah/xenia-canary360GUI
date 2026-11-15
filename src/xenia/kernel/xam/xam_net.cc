@@ -20,6 +20,7 @@
 #include "xenia/base/string_util.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/util/shim_utils.h"
+#include "xenia/kernel/xam/lan_live.h"
 #include "xenia/kernel/xam/xam_module.h"
 #include "xenia/kernel/xam/xam_private.h"
 #include "xenia/kernel/xam/xam_state.h"
@@ -801,6 +802,12 @@ dword_result_t NetDll_XNetGetTitleXnAddr_entry(dword_t caller,
     // Basically360: look like a console with DHCP, a gateway, DNS and an
     // online address: this copy's own (xnet_address) when there is more than
     // one copy on this PC.
+    if (lan_live::Enabled()) {
+      // LAN Live: this copy's address on the home network (or xnet_address).
+      lan_live::FillXnAddr(reinterpret_cast<uint8_t*>(addr_ptr.host_address()),
+                           lan_live::OwnAddress());
+      return 0x02 | 0x08 | 0x20 | 0x40 | 0x80;
+    }
     const uint32_t own = XSocket::InstanceAddress();
     if (own) {
       addr_ptr->ina.s_addr = htonl(own);
@@ -865,6 +872,11 @@ dword_result_t NetDll_XNetInAddrToXnAddr_entry(dword_t caller, dword_t address,
     // Basically360: the address of a console at in_addr, made the way
     // XNetGetTitleXnAddr makes this console's own.
     xn_addr.Zero();
+    if (lan_live::Enabled()) {
+      lan_live::FillXnAddr(reinterpret_cast<uint8_t*>(xn_addr.host_address()),
+                           uint32_t(address));
+      return 0;
+    }
     xn_addr->ina.s_addr = htonl(uint32_t(address));
     xn_addr->inaOnline.s_addr = htonl(uint32_t(address));
     xn_addr->wPortOnline = 1000;
@@ -1021,9 +1033,112 @@ DECLARE_XAM_EXPORT1(NetDll_XNetQosRelease, kNetworking, kStub);
 dword_result_t NetDll_XNetQosListen_entry(dword_t caller, lpvoid_t id,
                                           lpvoid_t data, dword_t data_size,
                                           dword_t r7, dword_t flags) {
-  return X_ERROR_FUNCTION_FAILED;
+  if (!lan_live::Enabled() || !id) {
+    return X_ERROR_FUNCTION_FAILED;
+  }
+  // Basically360 (lan_live): a host answers QoS probes for its session with
+  // this data (Minecraft: its world's details), shared with the other copies.
+  // Flags: ENABLE 1, DISABLE 2, SET_DATA 4, SET_BITSPERSEC 8, RELEASE 0x10.
+  lan_live::XnKid kid;
+  std::memcpy(kid.data(), id.as<uint8_t*>(), 8);
+  XELOGI("XNetQosListen(flags {:X}, {} bytes)", uint32_t(flags),
+         uint32_t(data_size));
+  if (flags & (0x2 | 0x10)) {
+    lan_live::ClearQos(kid);
+    return 0;
+  }
+  if (flags & 0x4) {
+    std::vector<uint8_t> bytes;
+    if (data && data_size) {
+      const uint8_t* p = data.as<uint8_t*>();
+      bytes.assign(p, p + uint32_t(data_size));
+    }
+    lan_live::SetQosData(kid, bytes);
+  } else if (flags & 0x1) {
+    std::vector<uint8_t> existing;
+    if (!lan_live::QosData(kid, &existing)) {
+      lan_live::SetQosData(kid, {});
+    }
+  }
+  return 0;
 }
-DECLARE_XAM_EXPORT1(NetDll_XNetQosListen, kNetworking, kStub);
+DECLARE_XAM_EXPORT1(NetDll_XNetQosListen, kNetworking, kImplemented);
+
+// Basically360 (lan_live): QoS of other consoles' sessions - those of the other
+// copies on this home network are reached at once and give the data their host
+// set with XNetQosListen; anything else can't be reached.
+dword_result_t NetDll_XNetQosLookup_entry(dword_t caller, dword_t xna_count,
+                                          lpdword_t xnas, lpdword_t xnkids,
+                                          lpdword_t xnkeys, dword_t ina_count,
+                                          lpdword_t inas, lpdword_t service_ids,
+                                          dword_t probes, dword_t bits_per_sec,
+                                          dword_t flags, dword_t event_handle,
+                                          lpdword_t pqos) {
+  const uint32_t count = uint32_t(xna_count) + uint32_t(ina_count);
+  std::vector<std::vector<uint8_t>> data(count);
+  std::vector<bool> found(count, false);
+  for (uint32_t i = 0; i < uint32_t(xna_count); ++i) {
+    if (!xnkids || !lan_live::Enabled()) {
+      break;
+    }
+    uint32_t kid_ptr = xnkids[i];
+    if (!kid_ptr) {
+      continue;
+    }
+    lan_live::XnKid kid;
+    std::memcpy(kid.data(), kernel_memory()->TranslateVirtual(kid_ptr), 8);
+    found[i] = lan_live::QosData(kid, &data[i]);
+  }
+  size_t data_total = 0;
+  for (const auto& d : data) {
+    data_total += (d.size() + 3) & ~size_t(3);
+  }
+  const uint32_t header = 8 + sizeof(XNQOSINFO) * std::max(count, 1u);
+  const uint32_t size = header + uint32_t(data_total);
+  uint32_t qos_guest = kernel_memory()->SystemHeapAlloc(size);
+  uint8_t* qos_bytes = kernel_memory()->TranslateVirtual(qos_guest);
+  std::memset(qos_bytes, 0, size);
+  auto qos = reinterpret_cast<XNQOS*>(qos_bytes);
+  qos->count = count;
+  qos->count_pending = 0;
+  uint32_t data_at = header;
+  uint32_t reached = 0;
+  for (uint32_t i = 0; i < count; ++i) {
+    XNQOSINFO& info = qos->info[i];
+    info.flags = 0x01;  // COMPLETE
+    if (found[i]) {
+      info.flags |= 0x02;  // TARGET_CONTACTED
+      info.probes_xmit = std::max(uint32_t(probes), 1u);
+      info.probes_recv = std::max(uint32_t(probes), 1u);
+      info.rtt_min_in_msecs = 2;
+      info.rtt_med_in_msecs = 3;
+      info.up_bits_per_sec = 100000000;
+      info.down_bits_per_sec = 100000000;
+      if (!data[i].empty()) {
+        info.flags |= 0x08;  // DATA_RECEIVED
+        info.data_len = uint16_t(data[i].size());
+        info.data_ptr = qos_guest + data_at;
+        std::memcpy(qos_bytes + data_at, data[i].data(), data[i].size());
+        data_at += uint32_t((data[i].size() + 3) & ~size_t(3));
+      }
+      ++reached;
+    }
+  }
+  XELOGI("XNetQosLookup({} console(s), {} server(s)) -> {} reached",
+         uint32_t(xna_count), uint32_t(ina_count), reached);
+  if (pqos) {
+    *pqos = qos_guest;
+  }
+  if (event_handle) {
+    auto ev =
+        kernel_state()->object_table()->LookupObject<XEvent>(event_handle);
+    if (ev) {
+      ev->Set(0, false);
+    }
+  }
+  return 0;
+}
+DECLARE_XAM_EXPORT1(NetDll_XNetQosLookup, kNetworking, kImplemented);
 
 dword_result_t NetDll_inet_addr_entry(lpstring_t addr_ptr) {
   if (!addr_ptr) {

@@ -44,6 +44,8 @@ DEFINE_string(
     "changes nothing. Used with xnet_online.",
     "Live");
 
+DECLARE_bool(xnet_online);
+
 namespace xe {
 namespace kernel {
 
@@ -236,13 +238,36 @@ void XSocket::BindToInstanceAddress() {
 // Bind gives a port below 1024 (but not 0) port + 10000 instead. Packets to and
 // from such a port on this machine (127.x.x.x) are mapped the same way, so a
 // title that talks to itself (a game's host on this console) still reaches its
-// own socket.
+// own socket. Basically360: with xnet_online, so are those to and from the home
+// network (10.x, 172.16-31.x, 192.168.x, 169.254.x) - another PC's copy of
+// Xenia bound its ports the same way.
+static bool IsHomeNetworkAddress(uint32_t address) {
+  return (address >> 24) == 10 || (address >> 20) == 0xAC1 ||
+         (address >> 16) == 0xC0A8 || (address >> 16) == 0xA9FE;
+}
+
 static bool IsRemappedLoopbackPort(uint32_t address, uint16_t port) {
-  return (address >> 24) == 127 && port != 0 && port < 1024;
+  if (port == 0 || port >= 1024) {
+    return false;
+  }
+  return (address >> 24) == 127 ||
+         (cvars::xnet_online && IsHomeNetworkAddress(address));
 }
 
 X_STATUS XSocket::Connect(N_XSOCKADDR* name, int name_len) {
   BindToInstanceAddress();
+  // Basically360: a privileged port there was bound as port + 10000 (see Bind).
+  sockaddr_in remapped = {};
+  if (name && name_len >= int(sizeof(sockaddr_in)) &&
+      reinterpret_cast<sockaddr*>(name)->sa_family == AF_INET) {
+    std::memcpy(&remapped, name, sizeof(remapped));
+    const uint32_t address = ntohl(remapped.sin_addr.s_addr);
+    const uint16_t port = ntohs(remapped.sin_port);
+    if (IsRemappedLoopbackPort(address, port)) {
+      remapped.sin_port = htons(uint16_t(port + 10000));
+      name = reinterpret_cast<N_XSOCKADDR*>(&remapped);
+    }
+  }
   int ret = connect(native_handle_, (sockaddr*)name, name_len);
   if (ret < 0) {
     return X_STATUS_UNSUCCESSFUL;

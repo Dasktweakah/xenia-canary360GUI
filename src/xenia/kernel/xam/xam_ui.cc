@@ -1086,7 +1086,8 @@ X_RESULT xeXamShowSigninUI(uint32_t user_index, uint32_t users_needed,
   // on another controller aren't offered, as on the console.
   if (b360::Available()) {
     auto* profiles = kernel_state()->xam_state()->profile_manager();
-    uint32_t slot = kernel_state()->emulator()->input_system()->GetLastUsedSlot();
+    uint32_t slot =
+        kernel_state()->emulator()->input_system()->GetLastUsedSlot();
     if (slot >= XUserMaxUserCount) {
       slot = 0;
     }

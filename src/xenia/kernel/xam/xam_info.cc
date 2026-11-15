@@ -51,6 +51,8 @@ DEFINE_bool(staging_mode, 0,
             "Enables preview mode in dashboards to render debug information.",
             "Kernel");
 
+DECLARE_bool(xnet_online);
+
 namespace xe {
 namespace kernel {
 namespace xam {
@@ -103,6 +105,22 @@ dword_result_t XamQueryLiveHiveA_entry(
   X_RESULT extended_error = 0x80151802;  // X_ONLINE_E_LOGON_NOT_LOGGED_ON
   if (!feature_name || !value_ptr || !value_buffer_size) {
     extended_error = X_E_INVALIDARG;
+  } else if (cvars::xnet_online) {
+    // Basically360: a Live service's base URL ("LiveServiceUrl.<service>").
+    // Minecraft: Xbox 360 Edition signed in to Live stops with "Failed to
+    // aquire services base url from endpoint titlestorage" without one. No
+    // Live services exist here, so it's an address that refuses connections
+    // (the title's requests then fail as when Live is down).
+    std::string name = feature_name.value();
+    const std::string prefix = "LiveServiceUrl.";
+    if (name.compare(0, prefix.size(), prefix) == 0) {
+      std::string url = "http://127.0.0.1:1/" + name.substr(prefix.size());
+      string_util::copy_truncating(static_cast<char*>(value_ptr), url,
+                                   value_buffer_size);
+      extended_error = X_E_SUCCESS;
+    }
+    XELOGI("XamQueryLiveHiveA({}) -> {}", name,
+           extended_error == X_E_SUCCESS ? "a local address" : "not found");
   }
 
   if (overlapped_ptr) {

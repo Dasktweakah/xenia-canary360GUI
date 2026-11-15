@@ -308,6 +308,9 @@ dword_result_t NetDll_XNetStartup_entry(dword_t caller,
     assert_true(params->cfgSizeOfStruct == sizeof(XNetStartupParams));
     std::memcpy(&xnet_startup_params, params, sizeof(XNetStartupParams));
   }
+  // Basically360: LAN Live starts with the title's networking, so the other
+  // copies know it's here from the start.
+  lan_live::Enabled();
 
   auto xam = kernel_state()->GetKernelModule<XamModule>("xam.xex");
 
@@ -372,7 +375,30 @@ dword_result_t NetDll_XNetGetOpt_entry(dword_t one, dword_t option_id,
         *buffer_size = sizeof(XNetStartupParams);
         return uint32_t(X_WSAError::X_WSAEMSGSIZE);
       }
-      std::memcpy(buffer_ptr, &xnet_startup_params, sizeof(XNetStartupParams));
+      {
+        // Basically360: what XNet runs with - a setting the title left at 0
+        // has XNet's default (Minecraft checks cfgQosDataLimitDiv4 before it
+        // gives XNetQosListen its world's details, and gives none at 0).
+        XNetStartupParams params = xnet_startup_params;
+        params.cfgSizeOfStruct = sizeof(XNetStartupParams);
+        auto or_default = [](uint8_t& value, uint8_t fallback) {
+          if (!value) {
+            value = fallback;
+          }
+        };
+        or_default(params.cfgSockMaxDgramSockets, 8);
+        or_default(params.cfgSockMaxStreamSockets, 32);
+        or_default(params.cfgSockDefaultRecvBufsizeInK, 16);
+        or_default(params.cfgSockDefaultSendBufsizeInK, 16);
+        or_default(params.cfgKeyRegMax, 4);
+        or_default(params.cfgSecRegMax, 32);
+        or_default(params.cfgQosDataLimitDiv4, 64);
+        or_default(params.cfgQosProbeTimeoutInSeconds, 2);
+        or_default(params.cfgQosProbeRetries, 3);
+        or_default(params.cfgQosSrvMaxSimultaneousResponses, 8);
+        or_default(params.cfgQosPairWaitTimeInSeconds, 2);
+        std::memcpy(buffer_ptr, &params, sizeof(XNetStartupParams));
+      }
       return 0;
     default:
       XELOGE("NetDll_XNetGetOpt: option {} unimplemented",

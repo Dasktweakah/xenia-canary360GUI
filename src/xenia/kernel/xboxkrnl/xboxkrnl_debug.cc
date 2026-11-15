@@ -23,7 +23,17 @@ namespace xe {
 namespace kernel {
 namespace xboxkrnl {
 
-void DbgBreakPoint_entry() { xe::debugging::Break(); }
+// Basically360: a retail console with no debugger attached carries on past a
+// breakpoint; so does Xenia unless a debugger is attached to it (Minecraft:
+// Xbox 360 Edition's XHttp/XAuth library hits one when Live services aren't
+// there, which used to end the game with "A breakpoint has been reached").
+void DbgBreakPoint_entry() {
+  if (xe::debugging::IsDebuggerAttached()) {
+    xe::debugging::Break();
+    return;
+  }
+  XELOGW("DbgBreakPoint: no debugger attached, carrying on");
+}
 DECLARE_XBOXKRNL_EXPORT2(DbgBreakPoint, kDebug, kStub, kImportant);
 
 // https://msdn.microsoft.com/en-us/library/xcb2z8hs.aspx

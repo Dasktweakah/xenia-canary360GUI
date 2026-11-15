@@ -48,6 +48,15 @@ class GpdInfoTitle : public GpdInfo {
   uint32_t GetAchievementCount();
   uint32_t GetUnlockedAchievementCount();
 
+  // Basically360: avatar awards (from the title's SPA).
+  void AddAvatarAward(const X_XDBF_GPD_AVATARAWARD& award,
+                      const std::u16string& name,
+                      const std::u16string& description,
+                      const std::u16string& unachieved);
+  X_XDBF_GPD_AVATARAWARD* GetAvatarAwardEntry(const uint32_t award_id);
+  uint32_t GetAvatarAwardCount();
+  uint32_t GetEarnedAvatarAwardCount();
+
  private:
   const char16_t* GetAchievementTitlePtr(const uint32_t id);
   const char16_t* GetAchievementDescriptionPtr(const uint32_t id);

@@ -58,6 +58,8 @@ class UserTracker {
 
   // User related methods
   bool UnlockAchievement(uint64_t xuid, uint32_t achievement_id);
+  // Basically360: an avatar award (XUserAwardAvatarAssets) kept as earned.
+  bool AwardAvatarAsset(uint64_t xuid, uint32_t award_id);
   void RefreshTitleSummary(uint64_t xuid, uint32_t title_id);
 
   // Context

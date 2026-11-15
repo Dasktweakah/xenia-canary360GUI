@@ -9,6 +9,8 @@
 
 #include "xenia/kernel/xam/xdbf/spa_info.h"
 
+#include <algorithm>
+
 namespace xe {
 namespace kernel {
 namespace xam {
@@ -22,6 +24,7 @@ SpaInfo::SpaInfo(const std::span<uint8_t> buffer) : XdbfFile(buffer) {
 void SpaInfo::Load() {
   LoadLanguageData();
   LoadAchievements();
+  LoadAvatarAwards();
   LoadProperties();
   LoadContexts();
   LoadPresenceModes();
@@ -99,6 +102,32 @@ void SpaInfo::LoadAchievements() {
 
   for (uint32_t i = 0; i < section_header->count; i++) {
     achievements_.push_back(&ptr[i]);
+  }
+}
+
+void SpaInfo::LoadAvatarAwards() {
+  auto section =
+      GetEntry(static_cast<uint16_t>(SpaSection::kMetadata), kXdbfIdXgaa);
+  if (!section || section->data.size() < sizeof(XdbfSectionHeaderEx)) {
+    return;
+  }
+  auto header =
+      reinterpret_cast<const XdbfSectionHeaderEx*>(section->data.data());
+  if (header->magic != kXdbfSignatureXgaa) {
+    return;
+  }
+  const size_t room = (section->data.size() - sizeof(XdbfSectionHeaderEx)) /
+                      sizeof(AvatarAwardTableEntry);
+  auto ptr = reinterpret_cast<const AvatarAwardTableEntry*>(
+      section->data.data() + sizeof(XdbfSectionHeaderEx));
+  for (uint32_t i = 0; i < std::min<size_t>(header->count, room); i++) {
+    bool seen = false;  // (the male and female versions share an award id)
+    for (const auto* award : avatar_awards_) {
+      seen = seen || award->award_id == ptr[i].award_id;
+    }
+    if (!seen) {
+      avatar_awards_.push_back(&ptr[i]);
+    }
   }
 }
 

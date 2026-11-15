@@ -121,6 +121,37 @@ bool UserTracker::UnlockAchievement(uint64_t xuid, uint32_t achievement_id) {
   return true;
 }
 
+bool UserTracker::AwardAvatarAsset(uint64_t xuid, uint32_t award_id) {
+  auto user = kernel_state()->xam_state()->GetUserProfile(xuid);
+  if (!user || !spa_data_) {
+    return false;
+  }
+  auto title_gpd = &user->games_gpd_[spa_data_->title_id()];
+  auto award = title_gpd->GetAvatarAwardEntry(award_id);
+  if (!award) {
+    XELOGW("{}: avatar award {} isn't in the title's GPD", __func__, award_id);
+    return false;
+  }
+  if (award->flags & static_cast<uint32_t>(AchievementFlags::kAchieved)) {
+    return true;  // (earned before)
+  }
+  award->flags =
+      award->flags | static_cast<uint32_t>(AchievementFlags::kAchieved);
+  award->unlock_time = Clock::QueryGuestSystemTime();
+  if (auto title_info =
+          user->dashboard_gpd_.GetTitleInfo(spa_data_->title_id())) {
+    X_XDBF_GPD_TITLE_PLAYED updated = *title_info;
+    updated.all_avatar_awards.earned =
+        uint8_t(title_gpd->GetEarnedAvatarAwardCount());
+    updated.all_avatar_awards.possible =
+        uint8_t(title_gpd->GetAvatarAwardCount());
+    user->dashboard_gpd_.UpdateTitleInfo(spa_data_->title_id(), &updated);
+  }
+  XELOGI("Player: {} earned avatar award {}", user->name(), award_id);
+  FlushUserData(xuid);
+  return true;
+}
+
 void UserTracker::FlushUserData(const uint64_t xuid) {
   auto user = kernel_state()->xam_state()->GetUserProfile(xuid);
   if (!user) {
@@ -377,6 +408,38 @@ void UserTracker::UpdateTitleGpdFile() {
     for (const auto& entry : spa_data_->GetAchievements()) {
       AchievementDetails details(entry, spa_data_, user_language);
       game_gpd->second.AddAchievement(&details);
+    }
+
+    // Basically360: the title's avatar awards, with their pictures (as the
+    // console keeps them, for the Guide's Awards).
+    for (const auto* award : spa_data_->GetAvatarAwards()) {
+      X_XDBF_GPD_AVATARAWARD info = {};
+      info.magic = sizeof(X_XDBF_GPD_AVATARAWARD);
+      info.clothing_type = uint16_t(award->clothing_type);
+      info.award_id = uint16_t(award->award_id);
+      info.title_id = spa_data_->title_id();
+      info.image_id = award->image_id;
+      game_gpd->second.AddAvatarAward(
+          info,
+          xe::to_utf16(
+              spa_data_->GetStringTableEntry(user_language, award->name_id)),
+          xe::to_utf16(spa_data_->GetStringTableEntry(user_language,
+                                                      award->description_id)),
+          xe::to_utf16(spa_data_->GetStringTableEntry(user_language,
+                                                      award->unachieved_id)));
+      game_gpd->second.AddImage(award->image_id,
+                                spa_data_->GetIcon(award->image_id));
+    }
+    if (auto title_data =
+            user->dashboard_gpd_.GetTitleInfo(spa_data_->title_id())) {
+      const uint32_t possible = game_gpd->second.GetAvatarAwardCount();
+      if (title_data->all_avatar_awards.possible != possible) {
+        X_XDBF_GPD_TITLE_PLAYED updated = *title_data;
+        updated.all_avatar_awards.possible = uint8_t(possible);
+        updated.all_avatar_awards.earned =
+            uint8_t(game_gpd->second.GetEarnedAvatarAwardCount());
+        user->dashboard_gpd_.UpdateTitleInfo(spa_data_->title_id(), &updated);
+      }
     }
 
     // Then add game icon

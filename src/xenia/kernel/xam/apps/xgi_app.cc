@@ -558,6 +558,9 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
         if (user) {
           XELOGI("Player: {} Unlocked Avatar Award Asset ID: {}", user->name(),
                  avatar_asset.award_id.get());
+          // Basically360: kept in the title's GPD, for the Guide's Awards.
+          kernel_state_->xam_state()->user_tracker()->AwardAvatarAsset(
+              user->xuid(), avatar_asset.award_id);
         }
       }
 

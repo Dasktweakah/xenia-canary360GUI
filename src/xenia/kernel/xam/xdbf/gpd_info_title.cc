@@ -191,6 +191,68 @@ uint32_t GpdInfoTitle::GetUnlockedAchievementCount() {
   return count;
 }
 
+void GpdInfoTitle::AddAvatarAward(const X_XDBF_GPD_AVATARAWARD& award,
+                                  const std::u16string& name,
+                                  const std::u16string& description,
+                                  const std::u16string& unachieved) {
+  if (GetEntry(static_cast<uint16_t>(GpdSection::kAvatarAward),
+               award.award_id)) {
+    return;
+  }
+  const uint32_t strings_size =
+      static_cast<uint32_t>(string_util::size_in_bytes(name) +
+                            string_util::size_in_bytes(description) +
+                            string_util::size_in_bytes(unachieved));
+  Entry new_entry(award.award_id,
+                  static_cast<uint16_t>(GpdSection::kAvatarAward),
+                  sizeof(X_XDBF_GPD_AVATARAWARD) + strings_size);
+  uint8_t* write_ptr = new_entry.data.data();
+  memcpy(write_ptr, &award, sizeof(X_XDBF_GPD_AVATARAWARD));
+  write_ptr += sizeof(X_XDBF_GPD_AVATARAWARD);
+  for (const auto* text : {&name, &description, &unachieved}) {
+    string_util::copy_and_swap_truncating(
+        reinterpret_cast<char16_t*>(write_ptr), *text, text->length() + 1);
+    write_ptr += string_util::size_in_bytes(*text);
+  }
+  UpsertEntry(&new_entry);
+}
+
+X_XDBF_GPD_AVATARAWARD* GpdInfoTitle::GetAvatarAwardEntry(
+    const uint32_t award_id) {
+  Entry* entry =
+      GetEntry(static_cast<uint16_t>(GpdSection::kAvatarAward), award_id);
+  if (!entry || entry->data.size() < sizeof(X_XDBF_GPD_AVATARAWARD)) {
+    return nullptr;
+  }
+  return reinterpret_cast<X_XDBF_GPD_AVATARAWARD*>(entry->data.data());
+}
+
+uint32_t GpdInfoTitle::GetAvatarAwardCount() {
+  uint32_t count = 0;
+  for (const auto& entry : entries_) {
+    if (IsEntryOfSection(&entry, GpdSection::kAvatarAward) &&
+        entry.data.size() >= sizeof(X_XDBF_GPD_AVATARAWARD)) {
+      ++count;
+    }
+  }
+  return count;
+}
+
+uint32_t GpdInfoTitle::GetEarnedAvatarAwardCount() {
+  uint32_t count = 0;
+  for (const auto& entry : entries_) {
+    if (IsEntryOfSection(&entry, GpdSection::kAvatarAward) &&
+        entry.data.size() >= sizeof(X_XDBF_GPD_AVATARAWARD)) {
+      auto award =
+          reinterpret_cast<const X_XDBF_GPD_AVATARAWARD*>(entry.data.data());
+      if (award->flags & static_cast<uint32_t>(AchievementFlags::kAchieved)) {
+        ++count;
+      }
+    }
+  }
+  return count;
+}
+
 }  // namespace xam
 }  // namespace kernel
 }  // namespace xe

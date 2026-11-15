@@ -31,7 +31,8 @@ enum class GpdSection : uint16_t {
   kSetting = 0x3,
   kTitle = 0x4,  // Dashboard Gpd exclusive
   kString = 0x5,
-  kProtectedAchievement = 0x6,  // GFWL only
+  kProtectedAchievement = 0x6,  // GFWL only; on the console: avatar awards
+  kAvatarAward = 0x6,           // (Basically360: X_XDBF_GPD_AVATARAWARD)
 };
 
 enum class AchievementTypeFlags : uint32_t {
@@ -78,6 +79,21 @@ struct X_XDBF_GPD_ACHIEVEMENT {
   }
 };
 static_assert_size(X_XDBF_GPD_ACHIEVEMENT, 0x1C);
+
+// Basically360: an avatar award kept in a title's GPD (section 6, the
+// console's avatar award namespace; its id the award id), then its name, what
+// it is and how to earn it (UTF-16, big-endian, each ending in 0).
+struct X_XDBF_GPD_AVATARAWARD {
+  xe::be<uint32_t> magic;  // the struct's size
+  xe::be<uint32_t> clothing_type;
+  xe::be<uint32_t> award_id;
+  xe::be<uint32_t> title_id;
+  xe::be<uint32_t> image_id;
+  xe::be<uint32_t> flags;  // kAchieved once earned
+  xe::be<uint64_t> unlock_time;
+  xe::be<uint64_t> reserved;
+};
+static_assert_size(X_XDBF_GPD_AVATARAWARD, 0x28);
 
 struct X_XDBF_GPD_TITLE_PLAYED {
   xe::be<uint32_t> title_id;

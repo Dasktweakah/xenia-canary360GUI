@@ -242,6 +242,26 @@ struct AchievementTableEntry {
   xe::be<uint32_t> unk20;
 };
 static_assert_size(AchievementTableEntry, 0x24);
+
+// Basically360: an avatar award in the SPA's XGAA section (read from
+// Minecraft: Xbox 360 Edition's: two entries - its male and female clothes -
+// for most awards, with the same award id). award_id is what the title gives
+// XUserAwardAvatarAssets.
+struct AvatarAwardTableEntry {
+  xe::be<uint16_t> unk0;
+  xe::be<uint16_t> clothing_type;
+  xe::be<uint16_t> award_id;
+  uint8_t asset_hash[6];
+  xe::be<uint32_t> title_id;
+  xe::be<uint16_t> name_id;
+  xe::be<uint16_t> description_id;  // what it is
+  xe::be<uint16_t> unachieved_id;   // how to earn it
+  xe::be<uint16_t> unk16;
+  xe::be<uint32_t> image_id;
+  xe::be<uint32_t> unk1C;
+  xe::be<uint32_t> unk20;
+};
+static_assert_size(AvatarAwardTableEntry, 0x24);
 #pragma pack(pop)
 
 class SpaInfo : public XdbfFile {
@@ -285,6 +305,11 @@ class SpaInfo : public XdbfFile {
     return achievements_;
   }
 
+  // Basically360: the title's avatar awards, one per award id.
+  std::vector<const AvatarAwardTableEntry*> GetAvatarAwards() const {
+    return avatar_awards_;
+  }
+
   std::vector<const XdbfContextTableEntry*> GetContexts() const {
     return contexts_;
   }
@@ -326,6 +351,7 @@ class SpaInfo : public XdbfFile {
 
   // SPA is Read-Only so it's reasonable to make it readonly.
   std::vector<const AchievementTableEntry*> achievements_;
+  std::vector<const AvatarAwardTableEntry*> avatar_awards_;
   std::vector<const XdbfContextTableEntry*> contexts_;
   std::vector<const XdbfPropertyTableEntry*> properties_;
   std::vector<ViewTable> stats_views_;
@@ -338,6 +364,7 @@ class SpaInfo : public XdbfFile {
 
   void LoadTitleInformation();
   void LoadAchievements();
+  void LoadAvatarAwards();
 
   void LoadLanguageData();
 

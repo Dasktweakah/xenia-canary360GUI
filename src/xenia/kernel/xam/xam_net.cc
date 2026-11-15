@@ -1087,7 +1087,10 @@ dword_result_t NetDll_XNetQosLookup_entry(dword_t caller, dword_t xna_count,
     }
     lan_live::XnKid kid;
     std::memcpy(kid.data(), kernel_memory()->TranslateVirtual(kid_ptr), 8);
-    found[i] = lan_live::QosData(kid, &data[i]);
+    // Reached when a copy hosts it, with the host's data if it set any.
+    lan_live::Session session;
+    found[i] = lan_live::QosData(kid, &data[i]) ||
+               lan_live::FindSession(kid, &session);
   }
   size_t data_total = 0;
   for (const auto& d : data) {

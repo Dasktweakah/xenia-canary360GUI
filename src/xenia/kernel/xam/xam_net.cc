@@ -1069,7 +1069,7 @@ dword_result_t NetDll_XNetQosListen_entry(dword_t caller, lpvoid_t id,
   std::memcpy(kid.data(), id.as<uint8_t*>(), 8);
   XELOGI("XNetQosListen(flags {:X}, {} bytes)", uint32_t(flags),
          uint32_t(data_size));
-  if (flags & (0x2 | 0x10)) {
+  if (flags & 0x10) {
     lan_live::ClearQos(kid);
     return 0;
   }
@@ -1080,11 +1080,11 @@ dword_result_t NetDll_XNetQosListen_entry(dword_t caller, lpvoid_t id,
       bytes.assign(p, p + uint32_t(data_size));
     }
     lan_live::SetQosData(kid, bytes);
-  } else if (flags & 0x1) {
-    std::vector<uint8_t> existing;
-    if (!lan_live::QosData(kid, &existing)) {
-      lan_live::SetQosData(kid, {});
-    }
+  }
+  if (flags & 0x1) {
+    lan_live::SetQosListening(kid, true);
+  } else if (flags & 0x2) {
+    lan_live::SetQosListening(kid, false);
   }
   return 0;
 }
@@ -1155,6 +1155,17 @@ dword_result_t NetDll_XNetQosLookup_entry(dword_t caller, dword_t xna_count,
   }
   XELOGI("XNetQosLookup({} console(s), {} server(s)) -> {} reached",
          uint32_t(xna_count), uint32_t(ina_count), reached);
+  for (uint32_t i = 0; i < count; ++i) {
+    if (found[i]) {
+      const auto& d = data[i];
+      XELOGI("XNetQosLookup: console {}: {} bytes of data{}", i, d.size(),
+             d.size() >= 0xEA
+                 ? fmt::format(
+                       " (starts {:02X}{:02X}{:02X}{:02X}, byte E9 {:02X})",
+                       d[0], d[1], d[2], d[3], d[0xE9])
+                 : std::string());
+    }
+  }
   if (pqos) {
     *pqos = qos_guest;
   }

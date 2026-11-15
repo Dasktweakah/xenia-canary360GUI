@@ -77,8 +77,10 @@ void ModifySession(uint32_t session_handle, uint32_t flags, uint32_t max_public,
                    uint32_t max_private);
 void EndSession(uint32_t session_handle);
 
-// XNetQosListen for a session hosted here: its data (empty: none) or off.
+// XNetQosListen for a session hosted here: its data (kept while the listener
+// is off), whether it answers (ENABLE / DISABLE), and RELEASE.
 void SetQosData(const XnKid& id, const std::vector<uint8_t>& data);
+void SetQosListening(const XnKid& id, bool listening);
 void ClearQos(const XnKid& id);
 
 }  // namespace lan_live

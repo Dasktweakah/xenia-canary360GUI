@@ -96,9 +96,13 @@ struct HostedSession {
 std::mutex mutex_;
 std::once_flag started_;
 uint64_t instance_id_ = 0;
-std::map<uint64_t, Peer> peers_;             // by instance id
-std::map<uint32_t, HostedSession> hosted_;   // by session handle
-std::map<XnKid, std::vector<uint8_t>> qos_;  // ours, by session id
+std::map<uint64_t, Peer> peers_;            // by instance id
+std::map<uint32_t, HostedSession> hosted_;  // by session handle
+struct QosListener {
+  std::vector<uint8_t> data;
+  bool listening = false;
+};
+std::map<XnKid, QosListener> qos_;  // ours (XNetQosListen), by session id
 
 std::string Hex(const uint8_t* p, size_t n) {
   static const char digits[] = "0123456789ABCDEF";
@@ -177,9 +181,11 @@ std::string Describe() {
         << value << "\n";
     }
   }
-  for (const auto& [id, data] : qos_) {
-    m << "qos " << Hex(id.data(), 8) << " " << Hex(data.data(), data.size())
-      << "\n";
+  for (const auto& [id, listener] : qos_) {
+    if (listener.listening) {
+      m << "qos " << Hex(id.data(), 8) << " "
+        << Hex(listener.data.data(), listener.data.size()) << "\n";
+    }
   }
   return m.str();
 }
@@ -467,8 +473,8 @@ bool QosData(const XnKid& id, std::vector<uint8_t>* out) {
   }
   std::lock_guard<std::mutex> lock(mutex_);
   auto own = qos_.find(id);
-  if (own != qos_.end()) {
-    *out = own->second;
+  if (own != qos_.end() && own->second.listening) {
+    *out = own->second.data;
     return true;
   }
   for (const auto& [pid, peer] : peers_) {
@@ -519,7 +525,15 @@ void SetQosData(const XnKid& id, const std::vector<uint8_t>& data) {
     return;
   }
   std::lock_guard<std::mutex> lock(mutex_);
-  qos_[id] = data;
+  qos_[id].data = data;
+}
+
+void SetQosListening(const XnKid& id, bool listening) {
+  if (!Enabled()) {
+    return;
+  }
+  std::lock_guard<std::mutex> lock(mutex_);
+  qos_[id].listening = listening;
 }
 
 void ClearQos(const XnKid& id) {

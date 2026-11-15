@@ -1079,6 +1079,57 @@ X_RESULT xeXamShowSigninUI(uint32_t user_index, uint32_t users_needed,
     return X_ERROR_ACCESS_DENIED;
   }
 
+  // Basically360 running: the 360's own Sign In (its list of profiles) comes
+  // up for the controller that asked - a second player pressing START in a
+  // split-screen game - instead of Xenia's. The profile picked is signed in on
+  // that controller; B (nothing picked) leaves it as it was. Profiles signed in
+  // on another controller aren't offered, as on the console.
+  if (b360::Available()) {
+    auto* profiles = kernel_state()->xam_state()->profile_manager();
+    uint32_t slot = kernel_state()->emulator()->input_system()->GetLastUsedSlot();
+    if (slot >= XUserMaxUserCount) {
+      slot = 0;
+    }
+    std::vector<std::string> fields = {"SIGNIN", std::to_string(slot),
+                                       std::to_string(users_needed)};
+    for (const auto& [xuid, account] : *profiles->GetAccounts()) {
+      const uint8_t on = profiles->GetUserIndexAssignedToProfile(xuid);
+      if (on < XUserMaxUserCount && on != slot) {
+        continue;
+      }
+      fields.push_back(fmt::format("{:016X}", xuid));
+      fields.push_back(account.GetGamertagString());
+    }
+    kernel_state()->xam_state()->is_xam_dialog_present_.store(true);
+    kernel_state()->BroadcastNotification(kXNotificationSystemUI, true);
+    std::thread([fields, slot]() {
+      std::string reply;
+      uint64_t xuid = 0;
+      if (b360::Ask(fields, &reply) && reply.size() == 16) {
+        xuid = xe::string_util::from_string<uint64_t>(reply, true);
+      }
+      auto done = [xuid, slot]() {
+        if (xuid) {
+          XELOGI("Basically360 Sign In: {:016X} on controller {}", xuid, slot);
+          kernel_state()->xam_state()->profile_manager()->LoginMultiple(
+              {{static_cast<uint8_t>(slot), xuid}});
+        }
+        kernel_state()->xam_state()->is_xam_dialog_present_.store(false);
+        std::thread([]() {
+          xe::threading::Sleep(kUIDelayMillis);
+          kernel_state()->BroadcastNotification(kXNotificationSystemUI, false);
+        }).detach();
+      };
+      auto display_window = kernel_state()->emulator()->display_window();
+      if (display_window) {
+        display_window->app_context().CallInUIThread(done);
+      } else {
+        done();
+      }
+    }).detach();
+    return X_ERROR_SUCCESS;
+  }
+
   kernel_state()->xam_state()->is_xam_dialog_present_.store(true);
 
   auto close = [](ui::SigninUI* dialog) -> void {};
@@ -1184,7 +1235,8 @@ dword_result_t XamShowAchievementsUI_entry(dword_t user_index,
   // it would for the console's own).
   if (b360::Available()) {
     std::vector<std::string> fields = {"ACHIEVEMENTS",
-                                       fmt::format("{:08X}", proper_title_id)};
+                                       fmt::format("{:08X}", proper_title_id),
+                                       fmt::format("{:016X}", user->xuid())};
     kernel_state()->BroadcastNotification(kXNotificationSystemUI, true);
     std::thread([fields]() {
       std::string reply;

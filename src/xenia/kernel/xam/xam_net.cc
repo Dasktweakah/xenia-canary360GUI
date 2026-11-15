@@ -1891,6 +1891,14 @@ dword_result_t NetDll_XNetUnregisterKey_entry(dword_t caller,
 }
 DECLARE_XAM_EXPORT1(NetDll_XNetUnregisterKey, kNetworking, kStub);
 
+// Basically360: a host's session key changes (Minecraft, when its world goes
+// online); there is no XNet security layer here to tell.
+dword_result_t NetDll_XNetReplaceKey_entry(dword_t caller, lpvoid_t old_key_id,
+                                           lpvoid_t new_key_id) {
+  return 0;
+}
+DECLARE_XAM_EXPORT1(NetDll_XNetReplaceKey, kNetworking, kStub);
+
 }  // namespace xam
 }  // namespace kernel
 }  // namespace xe

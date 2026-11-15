@@ -1161,6 +1161,10 @@ dword_result_t NetDll_XHttpStartup_entry(dword_t caller, dword_t reserved,
 }
 DECLARE_XAM_EXPORT1(NetDll_XHttpStartup, kNetworking, kStub);
 
+// Basically360: the handle XHttpOpen gives with xnet_online (+1 a connection,
+// +2 a request).
+static constexpr uint32_t kFakeXHttpHandle = 0x48540000;
+
 dword_result_t NetDll_XHttpOpen_entry(dword_t caller, lpstring_t user_agent,
                                       dword_t access_type,
                                       lpstring_t proxy_name,
@@ -1171,10 +1175,121 @@ dword_result_t NetDll_XHttpOpen_entry(dword_t caller, lpstring_t user_agent,
     XThread::SetLastError(X_ERROR_INVALID_PARAMETER);
   }
 
+  if (cvars::xnet_online) {
+    // Basically360: a session handle; every request made with it then fails
+    // to connect, as when Live's web services are down (no Live services
+    // exist here). Minecraft: Xbox 360 Edition signed in to Live otherwise
+    // retries its title storage set-up every frame.
+    XThread::SetLastError(X_ERROR_SUCCESS);
+    return kFakeXHttpHandle;
+  }
   XThread::SetLastError(X_ERROR_NOT_SUPPORTED);  // Until properly implemented
   return 0;
 }
 DECLARE_XAM_EXPORT1(NetDll_XHttpOpen, kNetworking, kStub);
+
+// Basically360: with xnet_online, XHttp sessions, connections and requests are
+// handles that can't reach anything: sending fails with
+// ERROR_WINHTTP_CANNOT_CONNECT, so a title sees its web service as unreachable.
+static constexpr uint32_t kWinHttpCannotConnect = 12029;
+
+dword_result_t NetDll_XHttpShutdown_entry(dword_t caller) {
+  XThread::SetLastError(X_ERROR_SUCCESS);
+  return 1;
+}
+DECLARE_XAM_EXPORT1(NetDll_XHttpShutdown, kNetworking, kStub);
+
+dword_result_t NetDll_XHttpCloseHandle_entry(dword_t caller, dword_t handle) {
+  XThread::SetLastError(X_ERROR_SUCCESS);
+  return 1;
+}
+DECLARE_XAM_EXPORT1(NetDll_XHttpCloseHandle, kNetworking, kStub);
+
+dword_result_t NetDll_XHttpConnect_entry(dword_t caller, dword_t session,
+                                         lpstring_t server_name, dword_t port,
+                                         dword_t flags) {
+  XELOGI("XHttpConnect({}, port {}) -> no web services here",
+         server_name ? std::string(server_name.value()) : std::string(),
+         static_cast<uint32_t>(port));
+  if (!cvars::xnet_online || !session) {
+    XThread::SetLastError(kWinHttpCannotConnect);
+    return 0;
+  }
+  XThread::SetLastError(X_ERROR_SUCCESS);
+  return kFakeXHttpHandle + 1;
+}
+DECLARE_XAM_EXPORT1(NetDll_XHttpConnect, kNetworking, kStub);
+
+dword_result_t NetDll_XHttpSetStatusCallback_entry(dword_t caller,
+                                                   dword_t handle,
+                                                   dword_t callback,
+                                                   dword_t flags,
+                                                   dword_t reserved) {
+  XThread::SetLastError(X_ERROR_SUCCESS);
+  return 0;  // (the previous callback: none)
+}
+DECLARE_XAM_EXPORT1(NetDll_XHttpSetStatusCallback, kNetworking, kStub);
+
+dword_result_t NetDll_XHttpOpenRequest_entry(
+    dword_t caller, dword_t connect, lpstring_t verb, lpstring_t object_name,
+    lpstring_t version, lpstring_t referrer, lpdword_t accept_types,
+    dword_t flags) {
+  XELOGI("XHttpOpenRequest({} {})",
+         verb ? std::string(verb.value()) : std::string("GET"),
+         object_name ? std::string(object_name.value()) : std::string());
+  if (!cvars::xnet_online || !connect) {
+    XThread::SetLastError(kWinHttpCannotConnect);
+    return 0;
+  }
+  XThread::SetLastError(X_ERROR_SUCCESS);
+  return kFakeXHttpHandle + 2;
+}
+DECLARE_XAM_EXPORT1(NetDll_XHttpOpenRequest, kNetworking, kStub);
+
+dword_result_t NetDll_XHttpSendRequest_entry(
+    dword_t caller, dword_t request, dword_t headers, dword_t headers_length,
+    dword_t optional, dword_t optional_length, dword_t total_length,
+    dword_t context) {
+  XThread::SetLastError(kWinHttpCannotConnect);
+  return 0;
+}
+DECLARE_XAM_EXPORT1(NetDll_XHttpSendRequest, kNetworking, kStub);
+
+dword_result_t NetDll_XHttpReceiveResponse_entry(dword_t caller,
+                                                 dword_t request,
+                                                 dword_t reserved) {
+  XThread::SetLastError(kWinHttpCannotConnect);
+  return 0;
+}
+DECLARE_XAM_EXPORT1(NetDll_XHttpReceiveResponse, kNetworking, kStub);
+
+dword_result_t NetDll_XHttpQueryHeaders_entry(dword_t caller, dword_t request,
+                                              dword_t info_level, dword_t name,
+                                              dword_t buffer,
+                                              lpdword_t buffer_length,
+                                              lpdword_t index) {
+  XThread::SetLastError(kWinHttpCannotConnect);
+  return 0;
+}
+DECLARE_XAM_EXPORT1(NetDll_XHttpQueryHeaders, kNetworking, kStub);
+
+dword_result_t NetDll_XHttpReadData_entry(dword_t caller, dword_t request,
+                                          dword_t buffer, dword_t size,
+                                          lpdword_t read) {
+  if (read) {
+    *read = 0;
+  }
+  XThread::SetLastError(kWinHttpCannotConnect);
+  return 0;
+}
+DECLARE_XAM_EXPORT1(NetDll_XHttpReadData, kNetworking, kStub);
+
+dword_result_t NetDll_XHttpDoWork_entry(dword_t caller, dword_t session,
+                                        dword_t timeout) {
+  XThread::SetLastError(X_ERROR_SUCCESS);
+  return 1;
+}
+DECLARE_XAM_EXPORT1(NetDll_XHttpDoWork, kNetworking, kStub);
 
 dword_result_t NetDll_socket_entry(dword_t caller, dword_t af, dword_t type,
                                    dword_t protocol) {

@@ -280,7 +280,11 @@ DECLARE_XAM_EXPORT1(XamBuildLegacySystemResourceLocator, kNone, kImplemented);
 dword_result_t XamBuildXamResourceLocator_entry(lpu16string_t filename,
                                                 lpvoid_t buffer_ptr,
                                                 dword_t buffer_count) {
-  return keXamBuildResourceLocator(0, u"xam", filename.value(), buffer_ptr,
+  // xam's own resources: from the system's xam.xex when one is loaded beside a
+  // dashboard (its "xam" section), else a local xam.xzp.
+  const auto xam_module = kernel_state()->GetModule("xam", true);
+  return keXamBuildResourceLocator(xam_module ? xam_module->hmodule_ptr() : 0,
+                                   u"xam", filename.value(), buffer_ptr,
                                    buffer_count);
 }
 DECLARE_XAM_EXPORT1(XamBuildXamResourceLocator, kNone, kImplemented);

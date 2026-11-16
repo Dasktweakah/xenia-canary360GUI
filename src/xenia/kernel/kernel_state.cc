@@ -440,6 +440,19 @@ object_ref<XModule> KernelState::GetModule(const std::string_view name,
       return retain_object(user_module.get());
     }
   }
+  // A name without its extension ("xam" - XamBuildSharedSystemResourceLocator
+  // and the gamercard's ask for xam's module that way) matches a user module
+  // loaded from that name + ".xex" (the system's xam.xex loaded beside a
+  // dashboard), as on the console.
+  if (name.find_first_of(".\\:") == std::string_view::npos) {
+    for (auto user_module : user_modules_) {
+      const std::string base =
+          xe::utf8::find_name_from_guest_path(user_module->path());
+      if (xe::utf8::equal_case(base, std::string(name) + ".xex")) {
+        return retain_object(user_module.get());
+      }
+    }
+  }
   return nullptr;
 }
 

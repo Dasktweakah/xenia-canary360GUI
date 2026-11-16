@@ -110,28 +110,29 @@ ProfileManager::ProfileManager(KernelState* kernel_state,
     LoadAccount(account_xuid);
   }
 
-  if (!cvars::logged_profile_slot_0_xuid.empty()) {
-    Login(xe::string_util::from_string<uint64_t>(
-              cvars::logged_profile_slot_0_xuid, true),
-          0);
-  }
-
-  if (!cvars::logged_profile_slot_1_xuid.empty()) {
-    Login(xe::string_util::from_string<uint64_t>(
-              cvars::logged_profile_slot_1_xuid, true),
-          1);
-  }
-
-  if (!cvars::logged_profile_slot_2_xuid.empty()) {
-    Login(xe::string_util::from_string<uint64_t>(
-              cvars::logged_profile_slot_2_xuid, true),
-          2);
-  }
-
-  if (!cvars::logged_profile_slot_3_xuid.empty()) {
-    Login(xe::string_util::from_string<uint64_t>(
-              cvars::logged_profile_slot_3_xuid, true),
-          3);
+  // The profiles signed in on boot. A profile saved on two slots (an earlier
+  // session's slot kept in the config while it signed in on another) is signed
+  // in on the first only: signing it out again here, before the kernel's XAM
+  // state exists, crashed Xenia on boot.
+  const std::string* slots[XUserMaxUserCount] = {
+      &cvars::logged_profile_slot_0_xuid, &cvars::logged_profile_slot_1_xuid,
+      &cvars::logged_profile_slot_2_xuid, &cvars::logged_profile_slot_3_xuid};
+  for (uint8_t slot = 0; slot < XUserMaxUserCount; slot++) {
+    if (slots[slot]->empty()) {
+      continue;
+    }
+    const uint64_t xuid =
+        xe::string_util::from_string<uint64_t>(*slots[slot], true);
+    if (!xuid) {
+      continue;
+    }
+    if (GetUserIndexAssignedToProfile(xuid) < XUserMaxUserCount) {
+      XELOGW("Profile {:016X} is saved on more than one slot - slot {} skipped",
+             xuid, slot);
+      UpdateConfig(0, slot);
+      continue;
+    }
+    Login(xuid, slot);
   }
 }
 
@@ -332,8 +333,7 @@ void ProfileManager::Logout(const uint8_t user_index, bool notify) {
     return;
   }
 
-  kernel_state_->xam_state()->user_tracker()->RemoveUser(
-      profile->second->xuid());
+  user_tracker_->RemoveUser(profile->second->xuid());
   DismountProfile(profile->second->xuid());
   logged_profiles_.erase(profile);
   if (notify) {
@@ -597,12 +597,47 @@ bool ProfileManager::UpdateAccount(const uint64_t xuid,
   return true;
 }
 
+// The XUID saved in the config for a slot (not the command line's).
+static const std::string& SavedSlotXuid(uint8_t slot) {
+  switch (slot) {
+    case 0:
+      return dynamic_cast<cvar::ConfigVar<std::string>*>(
+                 &ACCESS_CVar(logged_profile_slot_0_xuid))
+          ->GetTypedConfigValue();
+    case 1:
+      return dynamic_cast<cvar::ConfigVar<std::string>*>(
+                 &ACCESS_CVar(logged_profile_slot_1_xuid))
+          ->GetTypedConfigValue();
+    case 2:
+      return dynamic_cast<cvar::ConfigVar<std::string>*>(
+                 &ACCESS_CVar(logged_profile_slot_2_xuid))
+          ->GetTypedConfigValue();
+    default:
+      return dynamic_cast<cvar::ConfigVar<std::string>*>(
+                 &ACCESS_CVar(logged_profile_slot_3_xuid))
+          ->GetTypedConfigValue();
+  }
+}
+
 void ProfileManager::UpdateConfig(const uint64_t xuid, const uint8_t slot) {
   if (slot >= XUserMaxUserCount) {
     return;
   }
 
-  const std::string hex_xuid = xe::string_util::to_hex_string(xuid);
+  const std::string hex_xuid =
+      xuid ? xe::string_util::to_hex_string(xuid) : std::string();
+  // One profile, one slot: a slot saved in the config with this profile (kept
+  // from an earlier session, also while the command line left it empty) is
+  // cleared.
+  if (xuid) {
+    for (uint8_t i = 0; i < XUserMaxUserCount; i++) {
+      const std::string& saved = SavedSlotXuid(i);
+      if (i != slot && !saved.empty() &&
+          xe::string_util::from_string<uint64_t>(saved, true) == xuid) {
+        UpdateConfig(0, i);
+      }
+    }
+  }
   switch (slot) {
     case 0:
       OVERRIDE_string(logged_profile_slot_0_xuid, hex_xuid);

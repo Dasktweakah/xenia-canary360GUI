@@ -355,8 +355,7 @@ void ProfileManager::LoginMultiple(
                                        slots_mask);
 }
 
-void ProfileManager::MoveToSlot(const uint64_t xuid,
-                                const uint8_t user_index) {
+void ProfileManager::MoveToSlot(const uint64_t xuid, const uint8_t user_index) {
   if (user_index >= XUserMaxUserCount) {
     return;
   }

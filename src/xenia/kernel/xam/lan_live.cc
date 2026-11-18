@@ -13,6 +13,7 @@
  *   session <id> <key> <host XNADDR> <flags> <max public> <max private>      *
  *           <filled public> <filled private> <host xuid>                     *
  *   ctx <session id> <context id> <value> (the host's contexts)              *
+ *   prop <session id> <property id> <value> (its number properties)         *
  *   qos <session id> <data>               (XNetQosListen's data)             *
  * (numbers and bytes in hex). What the others say is kept for 6 seconds.     *
  ******************************************************************************
@@ -181,6 +182,10 @@ std::string Describe() {
       m << "ctx " << Hex(s.id.data(), 8) << " " << std::hex << id << " "
         << value << "\n";
     }
+    for (const auto& [id, value] : s.properties) {
+      m << "prop " << Hex(s.id.data(), 8) << " " << std::hex << id << " "
+        << value << "\n";
+    }
   }
   for (const auto& [id, listener] : qos_) {
     if (listener.listening) {
@@ -232,6 +237,14 @@ bool Receive(const std::string& message) {
       auto it = session_index.find(sid);
       if (it != session_index.end()) {
         peer.sessions[it->second].contexts.emplace_back(cid, value);
+      }
+    } else if (key == "prop") {
+      std::string sid;
+      uint32_t pid = 0, value = 0;
+      f >> sid >> std::hex >> pid >> value;
+      auto it = session_index.find(sid);
+      if (it != session_index.end()) {
+        peer.sessions[it->second].properties.emplace_back(pid, value);
       }
     } else if (key == "qos") {
       std::string sid, data;
@@ -498,14 +511,101 @@ bool QosData(const XnKid& id, std::vector<uint8_t>* out) {
   return false;
 }
 
+std::vector<Session> Search(
+    const std::vector<std::pair<uint32_t, uint32_t>>& contexts,
+    const std::vector<std::pair<uint32_t, uint32_t>>& properties,
+    uint32_t max_results) {
+  std::vector<Session> out;
+  if (!Enabled()) {
+    return out;
+  }
+  const uint32_t title_id = kernel_state()->title_id();
+  auto differs = [](const std::vector<std::pair<uint32_t, uint32_t>>& have,
+                    uint32_t id, uint32_t value) {
+    for (const auto& [hid, hvalue] : have) {
+      if (hid == id) {
+        return hvalue != value;
+      }
+    }
+    return false;  // (not set by the host: matches)
+  };
+  std::lock_guard<std::mutex> lock(mutex_);
+  for (const auto& [pid, peer] : peers_) {
+    if (peer.title_id != title_id) {
+      continue;
+    }
+    for (const auto& session : peer.sessions) {
+      const uint32_t filled = std::max<uint32_t>(session.filled_public, 1);
+      if (session.max_public <= filled) {
+        continue;  // (full, or private only)
+      }
+      bool match = true;
+      for (const auto& [id, value] : contexts) {
+        match = match && !differs(session.contexts, id, value);
+      }
+      for (const auto& [id, value] : properties) {
+        // Title-defined ones (system properties - skill, gamer zone... -
+        // are ranges in a query, not equal values).
+        if (!(id & 0x8000)) {
+          match = match && !differs(session.properties, id, value);
+        }
+      }
+      if (match) {
+        out.push_back(session);
+      }
+    }
+  }
+  std::stable_sort(out.begin(), out.end(),
+                   [](const Session& a, const Session& b) {
+                     return a.filled_public + a.filled_private >
+                            b.filled_public + b.filled_private;
+                   });
+  if (out.size() > max_results) {
+    out.resize(max_results);
+  }
+  return out;
+}
+
+void HostAttribute(uint64_t xuid, uint32_t id, uint32_t value, bool context) {
+  if (!cvars::lan_live || !xuid) {
+    return;
+  }
+  std::lock_guard<std::mutex> lock(mutex_);
+  for (auto& [handle, hosted] : hosted_) {
+    if (hosted.session.host_xuid != xuid) {
+      continue;
+    }
+    auto& list = context ? hosted.session.contexts : hosted.session.properties;
+    bool found = false;
+    for (auto& [hid, hvalue] : list) {
+      if (hid == id) {
+        hvalue = value;
+        found = true;
+      }
+    }
+    if (!found) {
+      list.emplace_back(id, value);
+    }
+  }
+}
+
 void HostSession(uint32_t session_handle, const Session& session) {
   if (!Enabled()) {
     return;
   }
   std::lock_guard<std::mutex> lock(mutex_);
   hosted_[session_handle].session = session;
-  XELOGI("LAN Live: hosting session {} for the other copies",
-         Hex(session.id.data(), 8));
+  XELOGI(
+      "LAN Live: hosting session {} for the other copies (flags {:08X}, {} "
+      "public / {} private, {} context(s), {} propert(ies))",
+      Hex(session.id.data(), 8), session.flags, session.max_public,
+      session.max_private, session.contexts.size(), session.properties.size());
+  for (const auto& [id, value] : session.contexts) {
+    XELOGI("LAN Live:   context {:08X} = {}", id, value);
+  }
+  for (const auto& [id, value] : session.properties) {
+    XELOGI("LAN Live:   property {:08X} = {}", id, value);
+  }
 }
 
 void ModifySession(uint32_t session_handle, uint32_t flags, uint32_t max_public,

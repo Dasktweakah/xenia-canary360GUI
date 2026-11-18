@@ -47,6 +47,8 @@ struct Session {
   uint32_t filled_public = 0, filled_private = 0;
   uint64_t host_xuid = 0;
   std::vector<std::pair<uint32_t, uint32_t>> contexts;  // (id, value)
+  // The host's 32-bit number properties (XUserSetProperty), (id, value).
+  std::vector<std::pair<uint32_t, uint32_t>> properties;
 };
 
 // Whether LAN Live is on (--lan_live, with --xnet_online).
@@ -66,6 +68,20 @@ std::vector<Friend> Friends(uint32_t title_id);
 
 // A session by id, hosted here or by another copy.
 bool FindSession(const XnKid& id, Session* out);
+
+// Matchmaking (XSessionSearch): sessions the other copies host for this
+// title with an open public slot, whose contexts and title-defined number
+// properties don't differ from the ones searched for (one the host hasn't set
+// matches anything - there's no Xbox LIVE query to say otherwise). At most
+// max_results, those with the most players first.
+std::vector<Session> Search(
+    const std::vector<std::pair<uint32_t, uint32_t>>& contexts,
+    const std::vector<std::pair<uint32_t, uint32_t>>& properties,
+    uint32_t max_results);
+
+// A profile's context or number property changed (XUserSetContext /
+// XUserSetProperty): sessions this copy hosts for that profile take it.
+void HostAttribute(uint64_t xuid, uint32_t id, uint32_t value, bool context);
 
 // The data a host gives for its session's QoS (XNetQosListen).
 bool QosData(const XnKid& id, std::vector<uint8_t>* out);

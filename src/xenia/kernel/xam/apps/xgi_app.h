@@ -10,8 +10,11 @@
 #ifndef XENIA_KERNEL_XAM_APPS_XGI_APP_H_
 #define XENIA_KERNEL_XAM_APPS_XGI_APP_H_
 
+#include <vector>
+
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/xam/app_manager.h"
+#include "xenia/kernel/xam/lan_live.h"
 
 namespace xe {
 namespace kernel {
@@ -24,6 +27,10 @@ class XgiApp : public App {
 
   X_HRESULT DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
                                 uint32_t buffer_length) override;
+
+ private:
+  uint32_t WriteSearchResults(uint32_t results_ptr, uint32_t results_size,
+                              const std::vector<lan_live::Session>& found);
 };
 
 }  // namespace apps

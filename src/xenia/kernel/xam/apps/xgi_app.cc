@@ -117,6 +117,71 @@ XgiApp::XgiApp(KernelState* kernel_state) : App(kernel_state, 0xFB) {}
 
 // http://mb.mirage.org/bugzilla/xliveless/main.c
 
+// Basically360: sessions (lan_live) as an XSESSION_SEARCHRESULT_HEADER (count,
+// results) and its XSESSION_SEARCHRESULTs (0x5C) - each its XSESSION_INFO,
+// open and filled slots, then (after all the results) the host's number
+// properties (XUSER_PROPERTY, 0x18) and contexts (XUSER_CONTEXT, 8). As many
+// as fit in results_size; the count is returned.
+uint32_t XgiApp::WriteSearchResults(
+    uint32_t results_ptr, uint32_t results_size,
+    const std::vector<lan_live::Session>& found) {
+  constexpr uint32_t kResultSize = 0x5C;
+  constexpr uint32_t kPropertySize = 0x18;
+  uint8_t* out = memory_->TranslateVirtual(results_ptr);
+  std::memset(out, 0, results_size);
+  uint32_t fits = 0;
+  size_t extra = 0;
+  for (const auto& session : found) {
+    const size_t more =
+        session.properties.size() * kPropertySize + session.contexts.size() * 8;
+    if (8 + (fits + 1) * kResultSize + extra + more > results_size) {
+      break;
+    }
+    extra += more;
+    ++fits;
+  }
+  xe::store_and_swap<uint32_t>(out + 0x0, fits);
+  xe::store_and_swap<uint32_t>(out + 0x4, fits ? results_ptr + 8 : 0);
+  uint32_t extra_at = 8 + fits * kResultSize;
+  for (uint32_t i = 0; i < fits; ++i) {
+    const auto& session = found[i];
+    uint8_t* r = out + 8 + i * kResultSize;
+    std::memcpy(r + 0x00, session.id.data(), 8);
+    std::memcpy(r + 0x08, session.host.data(), 36);
+    std::memcpy(r + 0x2C, session.key.data(), 16);
+    const uint32_t filled_public = std::max<uint32_t>(session.filled_public, 1);
+    xe::store_and_swap<uint32_t>(r + 0x3C,
+                                 session.max_public > filled_public
+                                     ? session.max_public - filled_public
+                                     : 0);
+    xe::store_and_swap<uint32_t>(
+        r + 0x40, session.max_private > session.filled_private
+                      ? session.max_private - session.filled_private
+                      : 0);
+    xe::store_and_swap<uint32_t>(r + 0x44, filled_public);
+    xe::store_and_swap<uint32_t>(r + 0x48, session.filled_private);
+    xe::store_and_swap<uint32_t>(r + 0x4C, uint32_t(session.properties.size()));
+    xe::store_and_swap<uint32_t>(r + 0x50, uint32_t(session.contexts.size()));
+    xe::store_and_swap<uint32_t>(
+        r + 0x54, session.properties.empty() ? 0 : results_ptr + extra_at);
+    for (const auto& [property_id, value] : session.properties) {
+      uint8_t* p = out + extra_at;
+      xe::store_and_swap<uint32_t>(p + 0x0, property_id);
+      p[0x8] = 1;  // XUSER_DATA_TYPE_INT32
+      xe::store_and_swap<uint32_t>(p + 0x10, value);
+      extra_at += kPropertySize;
+    }
+    xe::store_and_swap<uint32_t>(
+        r + 0x58, session.contexts.empty() ? 0 : results_ptr + extra_at);
+    for (const auto& [context_id, value] : session.contexts) {
+      xe::store_and_swap<uint32_t>(out + extra_at, context_id);
+      xe::store_and_swap<uint32_t>(out + extra_at + 4, value);
+      extra_at += 8;
+    }
+  }
+  return fits;
+}
+
 X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
                                       uint32_t buffer_length) {
   // NOTE: buffer_length may be zero or valid.
@@ -145,6 +210,9 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
         kernel_state_->xam_state()->user_tracker()->UpdateContext(
             user->xuid(), xgi_context->context.context_id,
             xgi_context->context.value);
+        // Basically360: a session this copy hosts for the profile takes it.
+        lan_live::HostAttribute(user->xuid(), xgi_context->context.context_id,
+                                xgi_context->context.value, true);
       }
       return X_E_SUCCESS;
     }
@@ -175,6 +243,16 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
 
         kernel_state_->xam_state()->user_tracker()->AddProperty(user->xuid(),
                                                                 &property);
+        // Basically360: a 32-bit number property goes with a session this
+        // copy hosts for the profile (matchmaking).
+        if ((xgi_property->property_id >> 28) == 1 &&
+            xgi_property->data_address) {
+          lan_live::HostAttribute(
+              user->xuid(), xgi_property->property_id,
+              xe::load_and_swap<uint32_t>(
+                  memory_->TranslateVirtual(xgi_property->data_address)),
+              false);
+        }
       }
       return X_E_SUCCESS;
     }
@@ -289,6 +367,31 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
               user = xam->GetUserProfile(i);
             }
             hosted.host_xuid = user ? user->xuid() : 0;
+            if (user) {
+              // The host's contexts and number properties - what other
+              // copies' matchmaking searches look at.
+              auto tracker = xam->user_tracker();
+              for (const auto& key : tracker->GetUserContextIds(user->xuid())) {
+                if (auto value =
+                        tracker->GetUserContext(user->xuid(), key.value)) {
+                  hosted.contexts.emplace_back(key.value, *value);
+                }
+              }
+              for (const auto& key :
+                   tracker->GetUserPropertyIds(user->xuid())) {
+                const Property* property =
+                    tracker->GetProperty(user->xuid(), key.value);
+                if (!property || (key.value >> 28) != 1) {
+                  continue;
+                }
+                const auto data = property->get_host_data();
+                if (const auto* v = std::get_if<int32_t>(&data)) {
+                  hosted.properties.emplace_back(key.value, uint32_t(*v));
+                } else if (const auto* u = std::get_if<uint32_t>(&data)) {
+                  hosted.properties.emplace_back(key.value, *u);
+                }
+              }
+            }
             lan_live::HostSession(session_ptr, hosted);
           }
         }
@@ -375,65 +478,89 @@ X_HRESULT XgiApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
           found.push_back(session);
         }
       }
-      // XSESSION_SEARCHRESULT_HEADER (count, results), then the
-      // XSESSION_SEARCHRESULTs (0x5C) - each its XSESSION_INFO, open and
-      // filled slots and its contexts (after all the results).
-      constexpr uint32_t kResultSize = 0x5C;
-      uint8_t* out = memory_->TranslateVirtual(results_ptr);
-      std::memset(out, 0, results_size);
-      uint32_t fits = 0;
-      size_t contexts = 0;
-      for (const auto& session : found) {
-        const size_t need = 8 + (fits + 1) * kResultSize +
-                            (contexts + session.contexts.size()) * 8;
-        if (need > results_size) {
-          break;
-        }
-        contexts += session.contexts.size();
-        ++fits;
-      }
-      xe::store_and_swap<uint32_t>(out + 0x0, fits);
-      xe::store_and_swap<uint32_t>(out + 0x4, fits ? results_ptr + 8 : 0);
-      uint32_t context_at = 8 + fits * kResultSize;
-      for (uint32_t i = 0; i < fits; ++i) {
-        const auto& session = found[i];
-        uint8_t* r = out + 8 + i * kResultSize;
-        std::memcpy(r + 0x00, session.id.data(), 8);
-        std::memcpy(r + 0x08, session.host.data(), 36);
-        std::memcpy(r + 0x2C, session.key.data(), 16);
-        const uint32_t filled_public =
-            std::max<uint32_t>(session.filled_public, 1);
-        xe::store_and_swap<uint32_t>(r + 0x3C,
-                                     session.max_public > filled_public
-                                         ? session.max_public - filled_public
-                                         : 0);
-        xe::store_and_swap<uint32_t>(
-            r + 0x40, session.max_private > session.filled_private
-                          ? session.max_private - session.filled_private
-                          : 0);
-        xe::store_and_swap<uint32_t>(r + 0x44, filled_public);
-        xe::store_and_swap<uint32_t>(r + 0x48, session.filled_private);
-        xe::store_and_swap<uint32_t>(r + 0x4C, 0);  // properties
-        xe::store_and_swap<uint32_t>(r + 0x50,
-                                     uint32_t(session.contexts.size()));
-        xe::store_and_swap<uint32_t>(r + 0x54, 0);
-        xe::store_and_swap<uint32_t>(
-            r + 0x58, session.contexts.empty() ? 0 : results_ptr + context_at);
-        for (const auto& [context_id, value] : session.contexts) {
-          xe::store_and_swap<uint32_t>(out + context_at, context_id);
-          xe::store_and_swap<uint32_t>(out + context_at + 4, value);
-          context_at += 8;
-        }
-      }
+      const uint32_t fits =
+          WriteSearchResults(results_ptr, results_size, found);
       XELOGI("XSessionSearchByIds({} id(s)) -> {} session(s) found", ids.size(),
              fits);
       return X_E_SUCCESS;
     }
     case 0x000B001C: {
-      // XSessionSearch (matchmaking queries): nothing on Xbox LIVE here.
-      XELOGI("XSessionSearch({:08X}, {:08X}) -> no sessions", buffer_ptr,
-             buffer_length);
-      return X_E_FAIL;
+      // XSessionSearch(procedure, user, max results, property count, context
+      // count, properties, contexts, results size, results): matchmaking.
+      // Basically360 (lan_live): the sessions the other copies host for this
+      // title that fit (lan_live::Search); without LAN Live, nothing.
+      {
+        std::string dump;
+        for (uint32_t i = 0; i < std::min<uint32_t>(buffer_length, 0x40); ++i) {
+          dump += fmt::format("{:02X}", buffer[i]);
+        }
+        XELOGI("XSessionSearch buffer ({} bytes): {}", buffer_length, dump);
+      }
+      if (!lan_live::Enabled() || buffer_length < 0x20) {
+        XELOGI("XSessionSearch({:08X}, {:08X}) -> no sessions", buffer_ptr,
+               buffer_length);
+        return X_E_FAIL;
+      }
+      const uint32_t procedure = xe::load_and_swap<uint32_t>(buffer + 0x0);
+      const uint32_t max_results = xe::load_and_swap<uint32_t>(buffer + 0x8);
+      const uint32_t num_props = xe::load_and_swap<uint16_t>(buffer + 0xC);
+      const uint32_t num_ctx = xe::load_and_swap<uint16_t>(buffer + 0xE);
+      const uint32_t props_ptr = xe::load_and_swap<uint32_t>(buffer + 0x10);
+      const uint32_t ctx_ptr = xe::load_and_swap<uint32_t>(buffer + 0x14);
+      const uint32_t size_field = xe::load_and_swap<uint32_t>(buffer + 0x18);
+      const uint32_t results_ptr = xe::load_and_swap<uint32_t>(buffer + 0x1C);
+      std::vector<std::pair<uint32_t, uint32_t>> contexts, properties;
+      for (uint32_t i = 0; ctx_ptr && i < std::min(num_ctx, 64u); ++i) {
+        const uint8_t* c = memory_->TranslateVirtual(ctx_ptr + i * 8);
+        contexts.emplace_back(xe::load_and_swap<uint32_t>(c),
+                              xe::load_and_swap<uint32_t>(c + 4));
+      }
+      for (uint32_t i = 0; props_ptr && i < std::min(num_props, 64u); ++i) {
+        const uint8_t* p = memory_->TranslateVirtual(props_ptr + i * 0x18);
+        const uint32_t id = xe::load_and_swap<uint32_t>(p);
+        if (p[0x8] == 1) {  // XUSER_DATA_TYPE_INT32
+          properties.emplace_back(id, xe::load_and_swap<uint32_t>(p + 0x10));
+        }
+      }
+      for (const auto& [id, value] : contexts) {
+        XELOGI("XSessionSearch:   context {:08X} = {}", id, value);
+      }
+      for (const auto& [id, value] : properties) {
+        XELOGI("XSessionSearch:   property {:08X} = {}", id, value);
+      }
+      // The results' size: the value, or (as XSessionSearch takes it) a
+      // pointer to it.
+      uint32_t results_size = size_field;
+      uint32_t* size_out = nullptr;
+      if (size_field >= 0x10000000) {
+        size_out = memory_->TranslateVirtual<uint32_t*>(size_field);
+        results_size = xe::byte_swap(*size_out);
+      }
+      const auto found =
+          lan_live::Search(contexts, properties,
+                           std::max<uint32_t>(1, std::min(max_results, 50u)));
+      if (!results_ptr || results_size < 8) {
+        // Asking how big a buffer the results need.
+        uint32_t need = 8;
+        for (const auto& session : found) {
+          need += 0x5C + uint32_t(session.properties.size()) * 0x18 +
+                  uint32_t(session.contexts.size()) * 8;
+        }
+        if (size_out) {
+          *size_out = xe::byte_swap(
+              std::max(need, 8u + 0x5C * std::max(1u, max_results)));
+        }
+        XELOGI("XSessionSearch(procedure {}) -> needs {} bytes", procedure,
+               need);
+        return X_E_INSUFFICIENT_BUFFER;
+      }
+      const uint32_t fits =
+          WriteSearchResults(results_ptr, results_size, found);
+      XELOGI(
+          "XSessionSearch(procedure {}, up to {}, {} context(s), {} "
+          "propert(ies)) -> {} session(s) found",
+          procedure, max_results, contexts.size(), properties.size(), fits);
+      return X_E_SUCCESS;
     }
     case 0x000B0014: {
       // Gets 584107FB in game.

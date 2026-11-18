@@ -355,6 +355,33 @@ void ProfileManager::LoginMultiple(
                                        slots_mask);
 }
 
+void ProfileManager::MoveToSlot(const uint64_t xuid,
+                                const uint8_t user_index) {
+  if (user_index >= XUserMaxUserCount) {
+    return;
+  }
+  const uint8_t was = GetUserIndexAssignedToProfile(xuid);
+  if (was == user_index) {
+    return;
+  }
+  XELOGI("Basically360 Sign In: {:016X} moves from controller {} to {}", xuid,
+         was, user_index);
+  keep_config_ = true;
+  int slots_mask = 1 << user_index;
+  if (was < XUserMaxUserCount) {
+    Logout(was, false);
+    slots_mask |= 1 << was;
+  }
+  const auto other = logged_profiles_.find(user_index);
+  if (other != logged_profiles_.cend()) {
+    Logout(user_index, false);
+  }
+  Login(xuid, user_index, false);
+  keep_config_ = false;
+  kernel_state_->BroadcastNotification(kXNotificationSystemSignInChanged,
+                                       slots_mask);
+}
+
 std::vector<uint64_t> ProfileManager::FindProfiles() const {
   // Info: Profile directory name is also it's offline xuid
   std::vector<uint64_t> profiles_xuids;
@@ -620,7 +647,7 @@ static const std::string& SavedSlotXuid(uint8_t slot) {
 }
 
 void ProfileManager::UpdateConfig(const uint64_t xuid, const uint8_t slot) {
-  if (slot >= XUserMaxUserCount) {
+  if (slot >= XUserMaxUserCount || keep_config_) {
     return;
   }
 

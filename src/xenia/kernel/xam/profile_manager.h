@@ -85,6 +85,11 @@ class ProfileManager {
              bool notify = true);
   void Logout(const uint8_t user_index, bool notify = true);
   void LoginMultiple(const std::map<uint8_t, uint64_t>& profiles);
+  // Basically360: a game's Sign In picked a profile signed in on another
+  // port - it moves to the port that asked (as if signed out there first).
+  // The config's saved slots are left as they were (they say whose
+  // controller 1 is), and the slot's earlier profile is signed out properly.
+  void MoveToSlot(const uint64_t xuid, const uint8_t user_index);
 
   bool LoadAccount(const uint64_t xuid);
 
@@ -133,6 +138,7 @@ class ProfileManager {
 
   std::map<uint64_t, X_XAMACCOUNTINFO> accounts_;
   std::map<uint8_t, std::unique_ptr<UserProfile>> logged_profiles_;
+  bool keep_config_ = false;  // Basically360: MoveToSlot leaves the config
 
   KernelState* kernel_state_;
   ContentManager* content_manager_;

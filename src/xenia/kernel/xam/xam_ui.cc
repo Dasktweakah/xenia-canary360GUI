@@ -1082,8 +1082,7 @@ X_RESULT xeXamShowSigninUI(uint32_t user_index, uint32_t users_needed,
   // Basically360 running: the 360's own Sign In (its list of profiles) comes
   // up for the controller that asked - a second player pressing START in a
   // split-screen game - instead of Xenia's. The profile picked is signed in on
-  // that controller; B (nothing picked) leaves it as it was. Profiles signed in
-  // on another controller aren't offered, as on the console.
+  // that controller; B (nothing picked) leaves it as it was.
   if (b360::Available()) {
     auto* profiles = kernel_state()->xam_state()->profile_manager();
     uint32_t slot =
@@ -1093,14 +1092,15 @@ X_RESULT xeXamShowSigninUI(uint32_t user_index, uint32_t users_needed,
     }
     std::vector<std::string> fields = {"SIGNIN", std::to_string(slot),
                                        std::to_string(users_needed)};
+    // Every profile is offered, those signed in on another port too: the
+    // ports go by which controller was used first, so the one asking isn't
+    // always the one Chris's profile went on - picking it moves it here.
     for (const auto& [xuid, account] : *profiles->GetAccounts()) {
-      const uint8_t on = profiles->GetUserIndexAssignedToProfile(xuid);
-      if (on < XUserMaxUserCount && on != slot) {
-        continue;
-      }
       fields.push_back(fmt::format("{:016X}", xuid));
       fields.push_back(account.GetGamertagString());
     }
+    XELOGI("Basically360 Sign In asked on controller {} ({} needed)", slot,
+           users_needed);
     kernel_state()->xam_state()->is_xam_dialog_present_.store(true);
     kernel_state()->BroadcastNotification(kXNotificationSystemUI, true);
     std::thread([fields, slot]() {
@@ -1112,8 +1112,13 @@ X_RESULT xeXamShowSigninUI(uint32_t user_index, uint32_t users_needed,
       auto done = [xuid, slot]() {
         if (xuid) {
           XELOGI("Basically360 Sign In: {:016X} on controller {}", xuid, slot);
-          kernel_state()->xam_state()->profile_manager()->LoginMultiple(
-              {{static_cast<uint8_t>(slot), xuid}});
+          auto* manager = kernel_state()->xam_state()->profile_manager();
+          const uint8_t on = manager->GetUserIndexAssignedToProfile(xuid);
+          if (on < XUserMaxUserCount && on != slot) {
+            manager->MoveToSlot(xuid, static_cast<uint8_t>(slot));
+          } else {
+            manager->LoginMultiple({{static_cast<uint8_t>(slot), xuid}});
+          }
         }
         kernel_state()->xam_state()->is_xam_dialog_present_.store(false);
         std::thread([]() {

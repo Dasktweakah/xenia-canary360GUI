@@ -194,6 +194,8 @@ void SDLAudioDriver::SDLCallback(void* userdata, Uint8* stream, int len) {
         std::memcpy(stream, buffer, len);
       }
     }
+    // Basically360: split screen's gain (apu_flags.h).
+    ApplyOutputGain(reinterpret_cast<float*>(stream), len / sizeof(float));
     driver->frames_unused_.push(buffer);
 
     auto ret = driver->semaphore_->Release(1, nullptr);

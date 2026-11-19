@@ -223,6 +223,8 @@ void XAudio2AudioDriver::SubmitFrame(float* frame) {
   } else {
     memcpy(output_frame, frame, frame_size_);
   }
+  // Basically360: split screen's gain (apu_flags.h).
+  ApplyOutputGain(output_frame, frame_size_ / sizeof(float));
 
   api::XAUDIO2_BUFFER buffer;
   buffer.Flags = 0;

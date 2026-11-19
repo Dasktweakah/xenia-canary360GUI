@@ -15,6 +15,7 @@
 #include <cstdlib>
 #include <cstring>
 
+#include "xenia/apu/apu_flags.h"
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/memory.h"
@@ -128,6 +129,14 @@ DEFINE_bool(
     "Basically360, split_screen: on a processor with fast and slow cores, the "
     "copies on screen share out the fast cores between them (each its own) "
     "and the waiting copies get the slow ones. Not with split_screen_cpu_mask.",
+    "Display");
+
+DEFINE_double(
+    split_screen_volume, 0.7,
+    "Basically360, split_screen: how loud players 2-4's copies play once "
+    "their player has joined (0 to 1; player 1's copy plays as it is). A copy "
+    "waiting hidden for its player is silent. Each copy plays its own sound, "
+    "so with several players the music and effects play more than once.",
     "Display");
 
 DEFINE_string(
@@ -1162,6 +1171,13 @@ void SplitScreen::Relaunch() {
 void SplitScreen::ApplyPlacement(const Placement& placement) {
   placement_ = placement;
   placement_applied_ = true;
+  // Sound: player 1's copy as it is; the others silent while they wait
+  // hidden, split_screen_volume once their player is in.
+  if (cvars::controller_instance > 1) {
+    apu::SetOutputGain(placement.visible
+                           ? static_cast<float>(cvars::split_screen_volume)
+                           : 0.0f);
+  }
 #if XE_PLATFORM_WIN32
   static_cast<ui::Win32Window*>(window_)->SetSplitScreenPlacement(
       placement.visible, placement.rect);

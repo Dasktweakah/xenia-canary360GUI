@@ -10,6 +10,7 @@
 #include "xenia/hid/sdl/sdl_input_driver.h"
 
 #include <charconv>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <unordered_map>
@@ -60,6 +61,17 @@ DEFINE_bool(
     "them. A controller that disconnects gets its port back when it returns. "
     "Off: ports follow the order Windows lists the controllers in, which "
     "often puts the controller in your hands on player 2 or 3.",
+    "HID");
+
+DEFINE_string(
+    player1_controller, "",
+    "Basically360: the controller that is always player 1 (port 1), as "
+    "vendor:product:version in hex (e.g. 045E:0B13:0523) - the dashboard's "
+    "controller 1, so the profile signed in on port 1 stays with it and games "
+    "give it player 1's screen. It takes port 1 as soon as it connects, and "
+    "no other controller takes port 1 by being used first while it's there "
+    "(or away for a moment). Empty, the default, or more than one controller "
+    "like it connected: ports by first use only.",
     "HID");
 
 DEFINE_int32(
@@ -637,6 +649,18 @@ void SDLInputDriver::OnControllerDeviceAdded(const SDL_Event& event) {
            state.device_key);
     XELOGI("SDL Controller {}: {}", user_id,
            SDL_GameControllerMapping(controller));
+    // player1_controller: it goes to port 1 (index 0), whoever was there
+    // moving to its place.
+    if (user_id != 0 && IsPlayer1Controller(controller)) {
+      SwapPorts(static_cast<size_t>(user_id), 0);
+      user_id = 0;
+      XELOGI(
+          "SDL: \"{}\" is player 1's controller (player1_controller): port 1",
+          SDL_GameControllerName(controller));
+    }
+    if (user_id == 0 && IsPlayer1Controller(controller)) {
+      player1_away_ = false;
+    }
     // controller_instance: this copy's controller is back.
     if (InstanceMode() && !instance_port_ && !instance_last_key_.empty() &&
         state.device_key == instance_last_key_ &&
@@ -665,6 +689,9 @@ void SDLInputDriver::OnControllerDeviceRemoved(const SDL_Event& event) {
     // A player's controller keeps its port while it is away (a wireless pad
     // that fell asleep); it is the lowest free port when it comes back.
     port_reserved_.at(*idx) = controllers_.at(*idx).used;
+    if (*idx == 0 && IsPlayer1Controller(controllers_.at(*idx).sdl)) {
+      player1_away_ = true;  // port 1 stays its until it's back
+    }
     SDL_GameControllerClose(controllers_.at(*idx).sdl);
     controllers_.at(*idx) = {};
     keystroke_states_.at(*idx) = {};
@@ -806,6 +833,62 @@ void SDLInputDriver::OnControllerDeviceButtonChanged(const SDL_Event& event) {
   controller.state_changed = true;
 }
 
+// player1_controller: whether this is the controller that is always player 1.
+bool SDLInputDriver::IsPlayer1Controller(SDL_GameController* controller) const {
+  if (!controller || cvars::player1_controller.empty() || InstanceMode()) {
+    return false;
+  }
+#if SDL_VERSION_ATLEAST(2, 0, 6)
+  unsigned vendor = 0, product = 0, version = 0;
+  if (std::sscanf(cvars::player1_controller.c_str(), "%x:%x:%x", &vendor,
+                  &product, &version) != 3) {
+    return false;
+  }
+  SDL_Joystick* joystick = SDL_GameControllerGetJoystick(controller);
+  if (SDL_JoystickGetVendor(joystick) != vendor ||
+      SDL_JoystickGetProduct(joystick) != product ||
+      SDL_JoystickGetProductVersion(joystick) != version) {
+    return false;
+  }
+  // Two controllers alike (the same make and firmware): can't tell which.
+  int alike = 0;
+  for (const auto& state : controllers_) {
+    if (!state.sdl || state.sdl == controller) {
+      continue;
+    }
+    SDL_Joystick* j = SDL_GameControllerGetJoystick(state.sdl);
+    if (SDL_JoystickGetVendor(j) == vendor &&
+        SDL_JoystickGetProduct(j) == product &&
+        SDL_JoystickGetProductVersion(j) == version) {
+      ++alike;
+    }
+  }
+  return alike == 0;
+#else
+  return false;
+#endif
+}
+
+// Moves the controller on port `from` to port `to` (swapping), as
+// ClaimPortOnFirstUse does.
+void SDLInputDriver::SwapPorts(size_t from, size_t to) {
+  std::swap(controllers_.at(to), controllers_.at(from));
+  std::swap(port_reserved_.at(to), port_reserved_.at(from));
+  keystroke_states_.at(to) = {};
+  keystroke_states_.at(from) = {};
+  for (size_t i : {to, from}) {
+    auto& state = controllers_.at(i);
+    if (!state.sdl) {
+      continue;
+    }
+    state.state_changed = true;
+    UpdateXCapabilities(state, i);
+#if SDL_VERSION_ATLEAST(2, 0, 12)
+    SDL_GameControllerSetPlayerIndex(state.sdl, static_cast<int>(i));
+#endif
+  }
+}
+
 size_t SDLInputDriver::ClaimPortOnFirstUse(size_t user_index) {
   controllers_.at(user_index).used = true;
   if (!cvars::controller_ports_by_first_use) {
@@ -813,7 +896,10 @@ size_t SDLInputDriver::ClaimPortOnFirstUse(size_t user_index) {
   }
   for (size_t port = 0; port < user_index; port++) {
     const auto& other = controllers_.at(port);
-    const bool free = other.sdl ? !other.used : !port_reserved_.at(port);
+    bool free = other.sdl ? !other.used : !port_reserved_.at(port);
+    if (port == 0 && (player1_away_ || IsPlayer1Controller(other.sdl))) {
+      free = false;  // player1_controller's port
+    }
     if (!free) {
       continue;
     }

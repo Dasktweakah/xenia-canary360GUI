@@ -363,6 +363,14 @@ void ProfileManager::MoveToSlot(const uint64_t xuid, const uint8_t user_index) {
   if (was == user_index) {
     return;
   }
+  // The profile on controller 1 that the config names (Basically360: the
+  // dashboard's own - Chris's) stays player 1.
+  if (was == 0 && xuid == xe::string_util::from_string<uint64_t>(
+                              cvars::logged_profile_slot_0_xuid, true)) {
+    XELOGI("Basically360 Sign In: {:016X} stays on controller 0 (player 1)",
+           xuid);
+    return;
+  }
   XELOGI("Basically360 Sign In: {:016X} moves from controller {} to {}", xuid,
          was, user_index);
   keep_config_ = true;

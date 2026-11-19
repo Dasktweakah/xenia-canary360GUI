@@ -109,6 +109,8 @@ class SDLInputDriver final : public InputDriver {
   void ReleaseInstanceClaim();
   void TakeInstanceController(size_t port);
   std::string DeviceKey(SDL_GameController* controller) const;
+  bool IsPlayer1Controller(SDL_GameController* controller) const;
+  void SwapPorts(size_t from, size_t to);
 
   inline uint64_t AnalogToKeyfield(const X_INPUT_GAMEPAD& gamepad) const;
   std::optional<size_t> GetControllerIndexFromInstanceID(
@@ -131,6 +133,8 @@ class SDLInputDriver final : public InputDriver {
   std::array<KeystrokeState, HID_SDL_USER_COUNT> keystroke_states_;
   // Ports whose used controller went away, kept for it to come back to.
   std::array<bool, HID_SDL_USER_COUNT> port_reserved_;
+  // player1_controller is away (disconnected): port 1 waits for it.
+  bool player1_away_ = false;
   // controller_instance: the port of this copy's controller, the device it
   // had last (to take back when it reconnects), and the shared table.
   std::optional<size_t> instance_port_;

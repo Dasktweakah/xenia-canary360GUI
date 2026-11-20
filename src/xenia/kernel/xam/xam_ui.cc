@@ -655,9 +655,14 @@ dword_result_t XamShowDeviceSelectorUI_entry(
 
   std::vector<const DummyDeviceInfo*> devices = ListStorageDevices();
 
-  // Basically360 running and more than one place to save: its Select Storage
-  // Device (with only the hard drive, the console didn't ask either).
-  if (!cvars::headless && devices.size() > 1 && b360::Available()) {
+  // Basically360 running and more than one place to save, or the game asking
+  // for the screen whatever (XCONTENTFLAG_FORCE_SHOW_UI - Minecraft's Change
+  // Storage Device): its Select Storage Device (with only the hard drive and
+  // no flag, the console didn't ask either).
+  constexpr uint32_t kForceShowUI = 0x00800000;
+  if (!cvars::headless &&
+      (devices.size() > 1 || (content_flags & kForceShowUI)) &&
+      b360::Available()) {
     std::vector<std::string> fields = {"DEVICESELECTOR", B360Xuid(user_index)};
     for (auto& device_info : devices) {
       fields.push_back(to_utf8(device_info->name));
@@ -1428,6 +1433,18 @@ dword_result_t XamShowFriendsUI_entry(dword_t user_index) {
   return X_ERROR_FUNCTION_FAILED;
 }
 DECLARE_XAM_EXPORT1(XamShowFriendsUI, kUI, kSketchy);
+
+// Basically360: Send Friend Request to a player (Minecraft's player list) -
+// the dashboard's Add Friend.
+dword_result_t XamShowFriendRequestUI_entry(dword_t user_index,
+                                            qword_t xuid_player) {
+  if (B360ShowAsync({"FRIENDREQUEST", B360Xuid(user_index),
+                     fmt::format("{:016X}", uint64_t(xuid_player))})) {
+    return X_ERROR_SUCCESS;
+  }
+  return X_ERROR_FUNCTION_FAILED;
+}
+DECLARE_XAM_EXPORT1(XamShowFriendRequestUI, kUI, kSketchy);
 
 dword_result_t XamShowPlayersUI_entry(dword_t user_index) {
   if (B360ShowAsync({"PLAYERS", B360Xuid(user_index)})) {

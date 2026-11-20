@@ -437,6 +437,41 @@ static dword_result_t XamShowMessageBoxUi(
   return result;
 }
 
+// Basically360 running: the screen a game asks for is one of the dashboard's
+// windows over the game (as the console's Guide showed them), and the game
+// carries on meanwhile, told the system's UI is up until it closes.
+static std::string B360Xuid(uint32_t user_index) {
+  auto user = user_index < XUserMaxUserCount
+                  ? kernel_state()->xam_state()->GetUserProfile(user_index)
+                  : nullptr;
+  return fmt::format("{:016X}", user ? user->xuid() : 0ull);
+}
+
+static bool B360ShowAsync(const std::vector<std::string>& fields) {
+  if (cvars::headless || !b360::Available()) {
+    return false;
+  }
+  kernel_state()->BroadcastNotification(kXNotificationSystemUI, true);
+  std::thread([fields]() {
+    std::string reply;
+    b360::Ask(fields, &reply);
+    xe::threading::Sleep(kUIDelayMillis);
+    kernel_state()->BroadcastNotification(kXNotificationSystemUI, false);
+  }).detach();
+  return true;
+}
+
+// A Marketplace window's answer: UNLOCK - the game's own unlock offer taken,
+// so it's the full game from now on (as Xenia's own window does, with Yes).
+static void B360MarketplaceAnswer(const std::string& reply) {
+  if (reply != "UNLOCK") {
+    return;
+  }
+  cvars::license_mask = 1;
+  XELOGI("Basically360 Marketplace: full game unlocked (license_mask 1)");
+  kernel_state()->BroadcastNotification(kXNotificationLiveContentInstalled, 0);
+}
+
 dword_result_t XamIsUIActive_entry() {
   return kernel_state()->xam_state()->IsUIActive();
 }
@@ -620,6 +655,29 @@ dword_result_t XamShowDeviceSelectorUI_entry(
 
   std::vector<const DummyDeviceInfo*> devices = ListStorageDevices();
 
+  // Basically360 running and more than one place to save: its Select Storage
+  // Device (with only the hard drive, the console didn't ask either).
+  if (!cvars::headless && devices.size() > 1 && b360::Available()) {
+    std::vector<std::string> fields = {"DEVICESELECTOR", B360Xuid(user_index)};
+    for (auto& device_info : devices) {
+      fields.push_back(to_utf8(device_info->name));
+    }
+    return xeXamDispatchHeadless(
+        [device_id_ptr, devices, fields]() -> X_RESULT {
+          std::string reply;
+          int picked = 0;  // (no answer: the hard drive, as before)
+          if (b360::Ask(fields, &reply)) {
+            picked = std::atoi(reply.c_str());
+          }
+          if (picked < 0 || picked >= int(devices.size())) {
+            return X_ERROR_CANCELLED;
+          }
+          *device_id_ptr = static_cast<uint32_t>(devices[picked]->device_id);
+          return X_ERROR_SUCCESS;
+        },
+        overlapped);
+  }
+
   if (cvars::headless || !cvars::storage_selection_dialog) {
     // Default to the first storage device (HDD) if headless.
     return xeXamDispatchHeadless(
@@ -698,6 +756,10 @@ dword_result_t XamShowDirtyDiscErrorUI_entry(dword_t user_index) {
     return X_ERROR_SUCCESS;
   }
 
+  if (B360ShowAsync({"DIRTYDISC"})) {
+    return X_ERROR_SUCCESS;
+  }
+
   const Emulator* emulator = kernel_state()->emulator();
   xe::ui::ImGuiDrawer* imgui_drawer = emulator->imgui_drawer();
   xeXamDispatchDialog<MessageBoxDialog>(
@@ -719,6 +781,10 @@ dword_result_t XamShowNuiDirtyDiscErrorUI_entry(dword_t tracking_id) {
     return X_ERROR_SUCCESS;
   }
 
+  if (B360ShowAsync({"DIRTYDISC"})) {
+    return X_ERROR_SUCCESS;
+  }
+
   const Emulator* emulator = kernel_state()->emulator();
   xe::ui::ImGuiDrawer* imgui_drawer = emulator->imgui_drawer();
   xeXamDispatchDialog<MessageBoxDialog>(
@@ -729,6 +795,9 @@ dword_result_t XamShowNuiDirtyDiscErrorUI_entry(dword_t tracking_id) {
 DECLARE_XAM_EXPORT1(XamShowNuiDirtyDiscErrorUI, kUI, kStub);
 
 dword_result_t XamShowPartyUI_entry(dword_t user_index) {
+  if (B360ShowAsync({"PARTY", B360Xuid(user_index)})) {
+    return X_ERROR_SUCCESS;
+  }
   return X_ERROR_FUNCTION_FAILED;
 }
 DECLARE_XAM_EXPORT1(XamShowPartyUI, kUI, kStub);
@@ -769,10 +838,31 @@ dword_result_t XamShowMarketplaceUIEx_entry(dword_t user_index, dword_t ui_type,
     return X_ERROR_ACCESS_DENIED;
   }
 
-  kernel_state()->xam_state()->is_xam_dialog_present_.store(true);
-
   bool is_xbla_unlock_offer =
       (offer_id == ((uint64_t(kernel_state()->title_id()) << 32) | 1ull));
+
+  // Basically360 running: its Marketplace window - the game's unlock offer
+  // can be taken there (UNLOCK).
+  if (b360::Available()) {
+    static const char* kinds[] = {"list", "item", "membership-list",
+                                  "membership-item"};
+    std::vector<std::string> fields = {
+        "MARKETPLACE", fmt::format("{:08X}", kernel_state()->title_id()),
+        ui_type < 4 ? kinds[ui_type]
+                    : fmt::format("other-{}", uint32_t(ui_type)),
+        fmt::format("{:016X}", uint64_t(offer_id))};
+    kernel_state()->BroadcastNotification(kXNotificationSystemUI, true);
+    std::thread([fields]() {
+      std::string reply;
+      b360::Ask(fields, &reply);
+      B360MarketplaceAnswer(reply);
+      xe::threading::Sleep(kUIDelayMillis);
+      kernel_state()->BroadcastNotification(kXNotificationSystemUI, false);
+    }).detach();
+    return X_ERROR_SUCCESS;
+  }
+
+  kernel_state()->xam_state()->is_xam_dialog_present_.store(true);
 
   auto close = [ui_type,
                 is_xbla_unlock_offer](MessageBoxDialog* dialog) -> void {
@@ -910,6 +1000,30 @@ dword_result_t XamShowMarketplaceDownloadItemsUI_entry(
   if (cvars::headless) {
     return xeXamDispatchHeadless(
         [hresult_ptr]() -> X_RESULT {
+          if (hresult_ptr) {
+            *hresult_ptr = X_E_SUCCESS;
+          }
+          return X_ERROR_SUCCESS;
+        },
+        overlapped);
+  }
+
+  // Basically360 running: its Marketplace window for these offers (a game's
+  // own unlock offer among them can be taken there: UNLOCK).
+  if (b360::Available()) {
+    std::vector<std::string> fields = {
+        "MARKETPLACE", fmt::format("{:08X}", kernel_state()->title_id()),
+        ui_type == X_MARKETPLACE_DOWNLOAD_ITEMS_ENTRYPOINTS::FREEITEMS
+            ? "free"
+            : "paid"};
+    for (uint32_t i = 0; i < num_offers; i++) {
+      fields.push_back(fmt::format("{:016X}", offers[i].get()));
+    }
+    return xeXamDispatchHeadless(
+        [fields, hresult_ptr]() -> X_RESULT {
+          std::string reply;
+          b360::Ask(fields, &reply);
+          B360MarketplaceAnswer(reply);
           if (hresult_ptr) {
             *hresult_ptr = X_E_SUCCESS;
           }
@@ -1270,6 +1384,11 @@ dword_result_t XamShowGamerCardUI_entry(dword_t user_index) {
     return X_ERROR_ACCESS_DENIED;
   }
 
+  if (B360ShowAsync({"GAMERCARD", fmt::format("{:016X}", user->xuid()),
+                     fmt::format("{:016X}", user->xuid()), user->name()})) {
+    return X_ERROR_SUCCESS;
+  }
+
   xe::ui::ImGuiDrawer* imgui_drawer =
       kernel_state()->emulator()->imgui_drawer();
 
@@ -1280,6 +1399,73 @@ dword_result_t XamShowGamerCardUI_entry(dword_t user_index) {
       close);
 }
 DECLARE_XAM_EXPORT1(XamShowGamerCardUI, kUserProfiles, kImplemented);
+
+// Basically360: another player's gamer card - theirs from the dashboard when
+// it's running (a profile on this PC by its gamertag).
+dword_result_t XamShowGamerCardUIForXUID_entry(dword_t user_index,
+                                               qword_t xuid_player) {
+  std::string tag;
+  for (uint32_t i = 0; i < XUserMaxUserCount; i++) {
+    auto user = kernel_state()->xam_state()->GetUserProfile(i);
+    if (user && user->xuid() == uint64_t(xuid_player)) {
+      tag = user->name();
+    }
+  }
+  if (B360ShowAsync({"GAMERCARD", fmt::format("{:016X}", uint64_t(xuid_player)),
+                     B360Xuid(user_index), tag})) {
+    return X_ERROR_SUCCESS;
+  }
+  return X_ERROR_FUNCTION_FAILED;
+}
+DECLARE_XAM_EXPORT1(XamShowGamerCardUIForXUID, kUI, kSketchy);
+
+// Basically360: the Guide's Friends, Players (recent players), Messages and
+// game invites (its Invite Players to Party) - the dashboard's own windows.
+dword_result_t XamShowFriendsUI_entry(dword_t user_index) {
+  if (B360ShowAsync({"FRIENDS", B360Xuid(user_index)})) {
+    return X_ERROR_SUCCESS;
+  }
+  return X_ERROR_FUNCTION_FAILED;
+}
+DECLARE_XAM_EXPORT1(XamShowFriendsUI, kUI, kSketchy);
+
+dword_result_t XamShowPlayersUI_entry(dword_t user_index) {
+  if (B360ShowAsync({"PLAYERS", B360Xuid(user_index)})) {
+    return X_ERROR_SUCCESS;
+  }
+  return X_ERROR_FUNCTION_FAILED;
+}
+DECLARE_XAM_EXPORT1(XamShowPlayersUI, kUI, kSketchy);
+
+dword_result_t XamShowMessagesUI_entry(dword_t user_index) {
+  if (B360ShowAsync({"MESSAGES", B360Xuid(user_index)})) {
+    return X_ERROR_SUCCESS;
+  }
+  return X_ERROR_FUNCTION_FAILED;
+}
+DECLARE_XAM_EXPORT1(XamShowMessagesUI, kUI, kSketchy);
+
+dword_result_t XamShowGameInviteUI_entry(dword_t user_index,
+                                         lpqword_t recipients,
+                                         dword_t recipient_count,
+                                         lpvoid_t unused) {
+  if (B360ShowAsync({"GAMEINVITE", B360Xuid(user_index)})) {
+    return X_ERROR_SUCCESS;
+  }
+  return X_ERROR_FUNCTION_FAILED;
+}
+DECLARE_XAM_EXPORT1(XamShowGameInviteUI, kUI, kSketchy);
+
+// XamShowGameInviteUI with the tracking ID of a Kinect skeleton first.
+dword_result_t XamShowNuiGameInviteUI_entry(dword_t tracking_id,
+                                            dword_t user_index,
+                                            lpqword_t recipients,
+                                            dword_t recipient_count,
+                                            lpvoid_t unused) {
+  return XamShowGameInviteUI_entry(user_index, recipients, recipient_count,
+                                   unused);
+}
+DECLARE_XAM_EXPORT1(XamShowNuiGameInviteUI, kUI, kSketchy);
 
 dword_result_t XamShowEditProfileUI_entry(dword_t user_index) {
   auto user = kernel_state()->xam_state()->GetUserProfile(user_index);
